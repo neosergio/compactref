@@ -1,0 +1,70 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+
+[project]
+name = "compactref"
+version = "0.1.0"
+description = "Generate compact human-facing references from ULIDs, UUIDs, and other stable identifiers"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+
+authors = [
+    { name = "Sergio Infante" }
+]
+
+keywords = [
+    "ulid",
+    "uuid",
+    "reference",
+    "identifier",
+    "short-id",
+    "human-readable",
+]
+
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Typing :: Typed",
+]
+
+dependencies = []
+
+
+[project.optional-dependencies]
+dev = [
+    "build>=1.2",
+    "pytest>=8",
+    "twine>=6",
+]
+
+
+[project.urls]
+Homepage = "https://github.com/neosergio/compactref"
+Repository = "https://github.com/neosergio/compactref"
+Issues = "https://github.com/neosergio/compactref/issues"
+
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+
+[tool.setuptools.package-data]
+compactref = ["py.typed"]
+
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = [
+    "-ra",
+    "-q",
+]
