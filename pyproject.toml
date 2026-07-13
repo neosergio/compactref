@@ -54,6 +54,7 @@ dev = [
 Homepage = "https://github.com/neosergio/compactref"
 Repository = "https://github.com/neosergio/compactref"
 Issues = "https://github.com/neosergio/compactref/issues"
+Changelog = "https://github.com/neosergio/compactref/blob/main/CHANGELOG.md"
 
 
 [tool.setuptools.packages.find]
@@ -70,6 +71,11 @@ addopts = [
     "-ra",
     "-q",
 ]
+# The package has no runtime dependencies, so every warning raised during a
+# test run comes from this code or from the standard library deprecating
+# something out from under it. Either way it is worth a failing build rather
+# than a line nobody reads.
+filterwarnings = ["error"]
 
 
 [tool.ruff]

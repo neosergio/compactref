@@ -1,14 +1,25 @@
 name: Verify publish setup
 
 # Run this by hand before cutting a release. It uploads nothing. It mints the
-# same OIDC token the publish workflow would send to PyPI and prints the claims,
-# so you can compare them against the Trusted Publisher configured at
-# https://pypi.org/manage/project/compactref/settings/publishing/
+# same OIDC token the publish workflow would send, and prints the claims, so you
+# can compare them against the Trusted Publisher configured at
 #
-# The claims must match that configuration exactly, in particular `environment`.
+#   https://pypi.org/manage/project/compactref/settings/publishing/
+#   https://test.pypi.org/manage/project/compactref/settings/publishing/
+#
+# The two indexes are separate services with separate accounts, separate
+# projects and separate publisher configs. A publisher registered on one grants
+# nothing on the other, and the environment claim differs between them, so each
+# has to be verified on its own. Pick which below.
 
 on:
   workflow_dispatch:
+    inputs:
+      environment:
+        description: Index whose publisher configuration to check
+        type: choice
+        options: [pypi, testpypi]
+        default: pypi
 
 # The GITHUB_TOKEN defaults to broad write access. Nothing here needs it;
 # the publish jobs re-grant id-token: write for Trusted Publishing.
@@ -17,9 +28,12 @@ permissions:
 
 jobs:
   verify:
-    name: Show the claims PyPI will check
+    name: Show the claims ${{ inputs.environment }} will check
     runs-on: ubuntu-latest
-    environment: pypi
+    # Must match the environment of the publish job being checked: the claim is
+    # part of what the index matches on, and it is the usual reason a release
+    # that looked fine everywhere else is rejected.
+    environment: ${{ inputs.environment }}
     permissions:
       # A job-level block replaces the workflow-level one rather than adding to
       # it, so contents: read has to be repeated here: this job checks out.
@@ -33,6 +47,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
+          cache: pip
 
       - name: Build and check the distribution metadata
         run: |
@@ -41,22 +56,37 @@ jobs:
           twine check --strict dist/*
 
       - name: Print the OIDC claims
+        env:
+          # Each index issues tokens for its own audience, and asking for the
+          # wrong one produces a token the index will not accept. The value is
+          # published rather than guessed.
+          #   https://pypi.org/_/oidc/audience      -> {"audience":"pypi"}
+          #   https://test.pypi.org/_/oidc/audience -> {"audience":"testpypi"}
+          INDEX_HOST: ${{ inputs.environment == 'testpypi' && 'test.pypi.org' || 'pypi.org' }}
         run: |
           set -euo pipefail
+
+          audience=$(curl -sSf "https://${INDEX_HOST}/_/oidc/audience" \
+            | python -c "import json,sys; print(json.load(sys.stdin)['audience'])")
+          echo "Index    : ${INDEX_HOST}"
+          echo "Audience : ${audience}"
+          echo
+
           response=$(curl -sSf \
             -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=pypi")
-          python3 - "$response" <<'PY'
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=${audience}")
+
+          python3 - "$response" "$INDEX_HOST" <<'PY'
           import base64
           import json
           import sys
 
-          token = json.loads(sys.argv[1])["value"]
+          token, host = json.loads(sys.argv[1])["value"], sys.argv[2]
           payload = token.split(".")[1]
           payload += "=" * (-len(payload) % 4)
           claims = json.loads(base64.urlsafe_b64decode(payload))
 
-          print("PyPI will check these claims:\n")
+          print(f"{host} will check these claims:\n")
           for claim in (
               "repository_owner",
               "repository",
@@ -64,7 +94,13 @@ jobs:
               "environment",
           ):
               print(f"  {claim}: {claims.get(claim, '<absent>')}")
-          print("\nThe Trusted Publisher on PyPI must name the same owner, repository,")
-          print("workflow file (publish.yml) and environment. An `environment` of")
-          print("<absent> here while PyPI expects one is the usual cause of a failed tag.")
+
+          print(
+              f"\nThe Trusted Publisher on {host} must name the same owner,"
+              "\nrepository, workflow file (publish.yml) and environment."
+              "\n\nWorkflow name is the file name, publish.yml, not the `name:`"
+              "\ninside it. An environment of <absent> here while the index"
+              "\nexpects one -- or a blank environment box on the index while"
+              "\nthis prints a name -- is the usual cause of invalid-publisher."
+          )
           PY

@@ -53,7 +53,7 @@ jobs:
       - run: pytest
 
   package:
-    name: Build and check package
+    name: Build and install the wheel
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -63,6 +63,58 @@ jobs:
         with:
           python-version: "3.13"
           cache: pip
+
       - run: pip install -e ".[dev]"
       - run: python -m build
       - run: twine check --strict dist/*
+
+      # twine validates metadata, not contents: a wheel missing py.typed passes
+      # it without a word. So install what was actually built, somewhere with no
+      # source tree to fall back on, and hold it to both of its promises.
+      - name: Install the wheel and use it
+        run: |
+          set -euo pipefail
+          python -m venv /tmp/smoke
+          /tmp/smoke/bin/pip install --quiet dist/*.whl mypy
+
+          cd /tmp    # out of the repo, so a stray import cannot find src/
+          /tmp/smoke/bin/python -c "
+          from compactref import generate_reference
+
+          reference = generate_reference('01J2H8NQPG6B5X8KGN97SX3R5C')
+          assert reference, 'the installed wheel produced no reference'
+          print(f'the installed wheel produced {reference}')
+          "
+
+      # The package ships py.typed, promising downstream users working type
+      # hints. If that file misses the wheel, mypy stops analyzing compactref
+      # and silently falls back to Any -- and a downstream project with
+      # ignore_missing_imports set (most of them) reports "no issues found" on
+      # code that misuses this API. Failing to ship one empty file quietly
+      # revokes the guarantee, so prove it survived the build: mypy must reject
+      # a call the type hints forbid.
+      - name: The installed wheel must still type-check its callers
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/typed && cd /tmp/typed
+          printf '%s\n' \
+            'from compactref import generate_reference' \
+            'generate_reference(["not a valid source"])' > misuse.py
+
+          # --ignore-missing-imports reproduces what a downstream project with
+          # that setting sees, and it is the case that actually goes quiet: a
+          # missing py.typed then yields "Success: no issues found" rather than
+          # a complaint. Without the flag mypy exits non-zero either way -- once
+          # for the bad call, once for the module it could not read -- and the
+          # check would pass on a wheel it was written to reject.
+          #
+          # Demand the diagnostic by name. A non-zero exit is not enough.
+          output=$(/tmp/smoke/bin/mypy --ignore-missing-imports misuse.py || true)
+          echo "$output"
+
+          if ! grep -q "arg-type" <<<"$output"; then
+            echo "::error::mypy did not reject a call the type hints forbid."
+            echo "py.typed is missing from the wheel, so callers get no type checking at all."
+            exit 1
+          fi
+          echo "mypy rejected the bad call: py.typed shipped."
