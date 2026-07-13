@@ -240,10 +240,8 @@ reports "almost certainly", which stops separating a format that
 collides twice a month from one that collides fifty times.
 
 `expected_collisions(reference_count, suffix_length)` returns how many
-*pairs* are expected to share a suffix in one bucket. With a unique
-constraint in place, a collision is a rejected insert, so this is really
-an error rate — the number of writes per bucket that will need an
-`attempt` retry:
+**colliding pairs** are expected in one bucket — two references sharing a
+suffix is one pair:
 
 ```python
 from compactref import collision_probability, expected_collisions
@@ -251,12 +249,23 @@ from compactref import collision_probability, expected_collisions
 collision_probability(2_000, suffix_length=3)   # 1.0   -> "certain"
 collision_probability(20_000, suffix_length=3)  # 1.0   -> "certain", equally
 
-expected_collisions(2_000, suffix_length=3)     # 1999  pairs
+expected_collisions(2_000, suffix_length=3)     # 1999   pairs
 expected_collisions(20_000, suffix_length=3)    # 199990 pairs
 ```
 
-Both formats are certain to collide. Only the second number tells you
-how badly.
+Both formats are certain to collide. Only the second number says how
+badly, which is what sizes a suffix.
+
+> **It is a measure of crowding, not a count of retries.**
+>
+> A colliding pair is not a rejected insert. A suffix drawn `k` times is
+> `k * (k - 1) / 2` pairs but only `k - 1` rejected inserts, so the two
+> agree while a bucket is sparse and part company once it fills. Two
+> thousand references over three digits is **1999 pairs but roughly 1135
+> rejected inserts** — the pair count overstates the retries by more than
+> half.
+>
+> Use it to compare formats. Do not size a retry budget with it.
 
 ### Find a safe volume
 

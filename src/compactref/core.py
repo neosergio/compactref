@@ -69,7 +69,11 @@ def generate_reference(
 
     Raises:
         TypeError:
-            If source has an unsupported type.
+            If source has an unsupported type, including bool. A type
+            checker will not catch that one: bool subclasses int, so the
+            annotation admits True, and Python has no way to spell "int
+            but not bool". The check is made at runtime instead, because
+            True would otherwise return the reference belonging to 1.
 
         ValueError:
             If source is empty, suffix_length is less than one, or
@@ -125,19 +129,30 @@ def collision_probability(reference_count: int, suffix_length: int) -> float:
 
 def expected_collisions(reference_count: int, suffix_length: int) -> float:
     """
-    Approximate how many pairs of ``reference_count`` references share a
-    suffix, within a single date and prefix bucket.
+    Approximate the number of *colliding pairs* among ``reference_count``
+    references, within a single date and prefix bucket.
+
+    A pair is two references that share a suffix. This is the quantity
+    ``n * (n - 1) / (2 * space)`` counts, and it is what the function
+    returns.
 
     collision_probability() answers whether anything collides at all. It
     saturates: once a format is crowded, every volume reports "almost
     certainly", which stops distinguishing a format that collides twice
-    a month from one that collides fifty times. This answers how often
-    instead.
+    a month from one that collides fifty times. This distinguishes them.
 
-    For a reference column with a unique constraint, a collision is a
-    rejected insert, so the result is really an error rate: the number
-    of writes per bucket a caller should expect to retry (see the
-    ``attempt`` argument of generate_reference()).
+    It is *not* the number of rejected inserts, and not the number of
+    ``attempt`` retries a caller needs. A suffix drawn ``k`` times is
+    ``k * (k - 1) / 2`` pairs but only ``k - 1`` rejected inserts, so the
+    two agree only while a bucket is sparse and diverge sharply once it
+    fills. Two thousand references over three digits is 1999 pairs and
+    about 1135 rejected inserts:
+
+        >>> expected_collisions(2_000, suffix_length=3)
+        1999.0
+
+    Read it as a measure of how crowded a format is, not as a count of
+    the work a caller will do.
     """
     if suffix_length < 1:
         raise ValueError("suffix_length must be greater than zero")
@@ -172,6 +187,15 @@ def _normalize_source(source: SourceIdentifier) -> bytes:
     """
     Convert a supported source identifier into a stable bytes value.
     """
+    # bool is a subclass of int, so True would otherwise reach the integer
+    # branch and quietly produce the reference for 1, and False the one for
+    # 0. A boolean is never an identifier; catching it here says so rather
+    # than issuing a reference that belongs to some other record.
+    if isinstance(source, bool):
+        raise TypeError(
+            "source must be a string, bytes, non-negative integer, or UUID"
+        )
+
     if isinstance(source, UUID):
         return source.bytes
 
