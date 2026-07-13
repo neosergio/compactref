@@ -153,8 +153,7 @@ def test_rejects_unsupported_source_type() -> None:
     with pytest.raises(
         TypeError,
         match=(
-            "source must be a string, bytes, "
-            "non-negative integer, or UUID"
+            "source must be a string, bytes, non-negative integer, or UUID"
         ),
     ):
         generate_reference(["unsupported"])  # type: ignore[arg-type]

@@ -7,6 +7,7 @@ from .core import (
     max_references,
 )
 
+
 __all__ = [
     "DEFAULT_DATE_FORMAT",
     "DEFAULT_SUFFIX_LENGTH",
