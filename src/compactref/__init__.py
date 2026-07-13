@@ -17,6 +17,7 @@ from .core import (
     suffix_length_for,
     verify_reference,
 )
+from .reference import CompactRef
 
 
 __all__ = [
@@ -28,6 +29,7 @@ __all__ = [
     "DIGITS",
     "MAX_ATTEMPT",
     "MAX_NAMESPACE_BYTES",
+    "CompactRef",
     "SourceIdentifier",
     "collision_probability",
     "expected_colliding_pairs",
@@ -39,4 +41,4 @@ __all__ = [
     "verify_reference",
 ]
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"

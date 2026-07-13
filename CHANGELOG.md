@@ -5,6 +5,62 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-07-13
+
+Additive. Nothing here changes what a reference looks like.
+
+### Added
+
+- **`CompactRef`** — a reference scheme: one configuration, used to
+  generate *and* to verify. It exists because `generate_reference()` and
+  `verify_reference()` take their configuration separately, and neither
+  can see what the other was told. Two things went wrong, both quietly:
+
+  - Verifying with a different alphabet, prefix or separator than the
+    reference was made with returns `False`. `False` means "this reference
+    is a typo", so a caller told a customer their perfectly good reference
+    was invalid, when it was the caller's own configuration that was
+    wrong.
+  - Verifying a reference with **no check character** — the default — read
+    the last character of the suffix as one, and passed about one time in
+    `len(alphabet)`. Measured: 105 of 1000 unchecked references "verified"
+    against a decimal alphabet. It was noise, and it did not say so.
+
+  `generate()` and `verify()` on a `CompactRef` read the same object, so
+  they cannot disagree, and `verify()` on a scheme built without
+  `check=True` raises rather than guessing. The configuration is validated
+  at construction, so a bad alphabet fails on the line that made it. The
+  sizing helpers are bound to it and know their own base.
+
+  The functions remain: the class is a layer over them, not a replacement.
+
+### Fixed
+
+- `expected_rejected_inserts()` returned a **negative** number of rejected
+  inserts for a roomy bucket — `-1.65e-07` for two references over ten
+  digits, where the true answer is `1e-10`. Written directly, the formula
+  subtracts two nearly equal numbers and the answer falls below what a
+  double can represent. It now goes through `log1p` and `expm1`, which
+  keep their precision exactly where that cancellation happens. Found by
+  Hypothesis on its first run.
+
+### Documented
+
+- **Attempts are independent draws, not a walk through unused values.**
+  Two attempts can land on the same suffix, exactly as two sources can, so
+  a retry loop is *not* guaranteed to find a free reference in a fixed
+  number of tries. It must keep checking and it must give up rather than
+  spin. Also found by Hypothesis, which produced a nine-attempt collision
+  in a 64-suffix bucket.
+
+### Tests
+
+- Property-based tests (Hypothesis) over every configuration, rather than
+  the one or two the hand-written tests sampled.
+- The README's retry loop is no longer pseudocode. It runs in
+  `tests/test_integration.py` against a real table with a real unique
+  constraint, a real `IntegrityError`, and a real retry.
+
 ## [0.4.0] - 2026-07-13
 
 Nothing here moves a reference you have already stored. Every new
@@ -198,6 +254,7 @@ strings 0.1.0 produced.
 - `collision_probability()` and `max_references()` size the suffix using
   the birthday model.
 
+[0.5.0]: https://github.com/neosergio/compactref/releases/tag/v0.5.0
 [0.4.0]: https://github.com/neosergio/compactref/releases/tag/v0.4.0
 [0.3.0]: https://github.com/neosergio/compactref/releases/tag/v0.3.0
 [0.2.1]: https://github.com/neosergio/compactref/releases/tag/v0.2.1

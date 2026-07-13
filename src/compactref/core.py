@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone, tzinfo
 from hashlib import blake2b
-from math import ceil, exp, log, sqrt
+from math import ceil, exp, expm1, log, log1p, sqrt
 from typing import TypeAlias
 from uuid import UUID
 from warnings import warn
@@ -168,6 +168,15 @@ def generate_reference(
             rejected attempt 0 can offer attempt 1, and so on. Every
             attempt is itself deterministic, so a reference can be
             recomputed later from the source and the attempt that won.
+
+            Attempts are independent draws, not a walk through unused
+            values: two of them can land on the same suffix, exactly as two
+            sources can. A retry loop is therefore not guaranteed to find a
+            free reference in a fixed number of tries — it must keep
+            checking, and it should give up rather than spin. In a bucket
+            sized for its volume this is rare; in one that is already
+            crowded, no retry policy will save the format, and the answer
+            is a longer suffix.
 
     Returns:
         A compact reference such as ``20260710482731`` or
@@ -383,7 +392,14 @@ def expected_rejected_inserts(
         return 0.0
 
     space: int = base**suffix_length
-    taken = space * (1.0 - (1.0 - 1.0 / space) ** reference_count)
+
+    # Written through log1p and expm1 rather than as the formula above.
+    # Spelled directly, a roomy bucket subtracts two nearly equal numbers:
+    # for two references over ten digits the true answer is 1e-10, and the
+    # double precision left over after the cancellation gives -1.7e-07 --
+    # a negative count of rejected inserts. log1p and expm1 keep their
+    # precision exactly where that cancellation happens.
+    taken = -space * expm1(reference_count * log1p(-1.0 / space))
     return reference_count - taken
 
 
