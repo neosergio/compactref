@@ -1,16 +1,23 @@
+import os
+import time
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timezone
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 import pytest
 
 from compactref import (
+    DEFAULT_TIMEZONE,
     MAX_ATTEMPT,
     SourceIdentifier,
     collision_probability,
+    expected_colliding_pairs,
     expected_collisions,
+    expected_rejected_inserts,
     generate_reference,
     max_references,
+    suffix_length_for,
 )
 
 
@@ -393,15 +400,17 @@ def test_collision_probability_rejects_negative_reference_count() -> None:
 
 
 @pytest.mark.parametrize("reference_count", [0, 1])
-def test_expected_collisions_is_zero_below_two_references(
+def test_expected_colliding_pairs_is_zero_below_two_references(
     reference_count: int,
 ) -> None:
-    assert expected_collisions(reference_count, suffix_length=6) == 0.0
+    assert expected_colliding_pairs(reference_count, suffix_length=6) == 0.0
 
 
-def test_expected_collisions_matches_the_pair_count() -> None:
+def test_expected_colliding_pairs_matches_the_pair_count() -> None:
     # 300 * 299 / (2 * 10**4)
-    assert expected_collisions(300, suffix_length=4) == pytest.approx(4.485)
+    assert expected_colliding_pairs(300, suffix_length=4) == pytest.approx(
+        4.485
+    )
 
 
 @pytest.mark.parametrize(
@@ -414,18 +423,20 @@ def test_expected_collisions_matches_the_pair_count() -> None:
         (20_000, 3, 199_990.0),
     ],
 )
-def test_expected_collisions_counts_pairs(
+def test_expected_colliding_pairs_counts_pairs(
     reference_count: int,
     suffix_length: int,
     expected: float,
 ) -> None:
-    assert expected_collisions(
+    assert expected_colliding_pairs(
         reference_count,
         suffix_length=suffix_length,
     ) == pytest.approx(expected)
 
 
-def test_expected_collisions_is_not_the_number_of_rejected_inserts() -> None:
+def test_expected_colliding_pairs_is_not_the_number_of_rejected_inserts() -> (
+    None
+):
     """Pairs and rejected inserts are different quantities.
 
     A suffix drawn k times is k * (k - 1) / 2 pairs but only k - 1
@@ -436,7 +447,7 @@ def test_expected_collisions_is_not_the_number_of_rejected_inserts() -> None:
     space = 10**3
     count = 2_000
 
-    pairs = expected_collisions(count, suffix_length=3)
+    pairs = expected_colliding_pairs(count, suffix_length=3)
 
     # Inserting count references into `space` slots, the expected number
     # rejected by a unique constraint is
@@ -448,21 +459,21 @@ def test_expected_collisions_is_not_the_number_of_rejected_inserts() -> None:
     assert pairs > rejected * 1.5
 
 
-def test_expected_collisions_grows_with_reference_count() -> None:
-    fewer = expected_collisions(50, suffix_length=4)
-    more = expected_collisions(120, suffix_length=4)
+def test_expected_colliding_pairs_grows_with_reference_count() -> None:
+    fewer = expected_colliding_pairs(50, suffix_length=4)
+    more = expected_colliding_pairs(120, suffix_length=4)
 
     assert 0.0 < fewer < more
 
 
-def test_expected_collisions_decreases_with_longer_suffix() -> None:
-    short_suffix = expected_collisions(300, suffix_length=4)
-    long_suffix = expected_collisions(300, suffix_length=6)
+def test_expected_colliding_pairs_decreases_with_longer_suffix() -> None:
+    short_suffix = expected_colliding_pairs(300, suffix_length=4)
+    long_suffix = expected_colliding_pairs(300, suffix_length=6)
 
     assert long_suffix < short_suffix
 
 
-def test_expected_collisions_keeps_counting_past_certainty() -> None:
+def test_expected_colliding_pairs_keeps_counting_past_certainty() -> None:
     # The point of the function: collision_probability saturates at
     # "certain" and stops separating a crowded format from a hopeless
     # one. The expected count still does.
@@ -472,28 +483,28 @@ def test_expected_collisions_keeps_counting_past_certainty() -> None:
     assert crowded == pytest.approx(1.0)
     assert hopeless == pytest.approx(1.0)
 
-    assert expected_collisions(20_000, suffix_length=3) > (
-        expected_collisions(2_000, suffix_length=3)
+    assert expected_colliding_pairs(20_000, suffix_length=3) > (
+        expected_colliding_pairs(2_000, suffix_length=3)
     )
 
 
 @pytest.mark.parametrize("suffix_length", [0, -1])
-def test_expected_collisions_rejects_invalid_suffix_length(
+def test_expected_colliding_pairs_rejects_invalid_suffix_length(
     suffix_length: int,
 ) -> None:
     with pytest.raises(
         ValueError,
         match="suffix_length must be greater than zero",
     ):
-        expected_collisions(10, suffix_length=suffix_length)
+        expected_colliding_pairs(10, suffix_length=suffix_length)
 
 
-def test_expected_collisions_rejects_negative_reference_count() -> None:
+def test_expected_colliding_pairs_rejects_negative_reference_count() -> None:
     with pytest.raises(
         ValueError,
         match="reference_count must not be negative",
     ):
-        expected_collisions(-1, suffix_length=6)
+        expected_colliding_pairs(-1, suffix_length=6)
 
 
 def test_max_references_grows_with_suffix_length() -> None:
@@ -534,3 +545,219 @@ def test_max_references_rejects_invalid_probability(
         match="max_probability must be between 0 and 1",
     ):
         max_references(6, max_probability=max_probability)
+
+
+# ---------------------------------------------------------------------------
+# 0.3.0: the date bucket no longer depends on the machine
+# ---------------------------------------------------------------------------
+
+
+def test_the_system_timezone_does_not_reach_the_reference() -> None:
+    """The bug 0.3.0 exists to kill.
+
+    Before 0.3.0 the default clock was datetime.now(), naive local time,
+    so the same identifier at the same instant produced 20260713... in
+    Lima and 20260714... in Tokyo. A reference that depends on which
+    machine produced it is not deterministic, which is the one thing this
+    library sells.
+    """
+    instant = datetime(2026, 7, 13, 23, 30, tzinfo=timezone.utc)
+
+    references = set()
+    for zone in ("UTC", "America/Lima", "Asia/Tokyo", "Pacific/Auckland"):
+        previous = os.environ.get("TZ")
+        os.environ["TZ"] = zone
+        time.tzset()
+        try:
+            references.add(
+                generate_reference(FIXED_ULID, generated_at=instant)
+            )
+        finally:
+            if previous is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = previous
+            time.tzset()
+
+    assert len(references) == 1
+
+
+def test_aware_datetimes_are_converted_into_the_reference_timezone() -> None:
+    # One instant, expressed two ways. Both must land in the same bucket.
+    utc = datetime(2026, 7, 13, 23, 30, tzinfo=timezone.utc)
+    tokyo = utc.astimezone(ZoneInfo("Asia/Tokyo"))  # 2026-07-14 08:30 +09
+
+    assert tokyo.strftime("%Y%m%d") == "20260714"  # a different wall date
+    assert generate_reference(FIXED_ULID, generated_at=utc) == (
+        generate_reference(FIXED_ULID, generated_at=tokyo)
+    )
+
+
+def test_tz_moves_the_bucket_boundary() -> None:
+    # 23:30 UTC is already the 14th in Tokyo. A caller who wants the
+    # business day rather than UTC asks for it, and gets it.
+    instant = datetime(2026, 7, 13, 23, 30, tzinfo=timezone.utc)
+
+    in_utc = generate_reference(FIXED_ULID, generated_at=instant)
+    in_tokyo = generate_reference(
+        FIXED_ULID,
+        generated_at=instant,
+        tz=ZoneInfo("Asia/Tokyo"),
+    )
+
+    assert in_utc.startswith("20260713")
+    assert in_tokyo.startswith("20260714")
+
+
+def test_naive_datetimes_are_taken_at_face_value() -> None:
+    # A wall clock the caller chose. It is used as given, whatever the
+    # machine's timezone says.
+    naive = datetime(2026, 7, 13, 23, 30)
+
+    for zone in ("UTC", "Pacific/Auckland"):
+        previous = os.environ.get("TZ")
+        os.environ["TZ"] = zone
+        time.tzset()
+        try:
+            reference = generate_reference(FIXED_ULID, generated_at=naive)
+        finally:
+            if previous is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = previous
+            time.tzset()
+
+        assert reference.startswith("20260713")
+
+
+def test_the_default_clock_is_aware() -> None:
+    # Nothing asserts the wall time, only that the default path does not
+    # go through naive local time.
+    reference = generate_reference(FIXED_ULID)
+    today = datetime.now(timezone.utc).strftime("%Y%m%d")
+
+    assert reference.startswith(today)
+
+
+def test_default_timezone_is_utc() -> None:
+    assert DEFAULT_TIMEZONE is timezone.utc
+
+
+# ---------------------------------------------------------------------------
+# 0.3.0: expected_rejected_inserts, and the honest name for the pair count
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("reference_count", [0, 1])
+def test_expected_rejected_inserts_is_zero_below_two_references(
+    reference_count: int,
+) -> None:
+    assert expected_rejected_inserts(reference_count, suffix_length=6) == 0.0
+
+
+def test_expected_rejected_inserts_matches_the_closed_form() -> None:
+    # n - space * (1 - (1 - 1/space) ** n), verified against simulation.
+    assert expected_rejected_inserts(2_000, suffix_length=3) == pytest.approx(
+        1135.2, abs=0.1
+    )
+
+
+def test_expected_rejected_inserts_cannot_exceed_the_reference_count() -> None:
+    # An insert can only be rejected once. Pairs have no such ceiling, and
+    # that is exactly why they were the wrong number to hand a caller.
+    for count in (100, 2_000, 5_000, 50_000):
+        assert 0.0 <= expected_rejected_inserts(count, 3) <= count
+
+    assert expected_colliding_pairs(50_000, 3) > 50_000
+
+
+def test_rejected_inserts_are_fewer_than_colliding_pairs_once_crowded() -> (
+    None
+):
+    pairs = expected_colliding_pairs(2_000, suffix_length=3)
+    rejected = expected_rejected_inserts(2_000, suffix_length=3)
+
+    assert pairs == pytest.approx(1999.0)
+    assert rejected == pytest.approx(1135.2, abs=0.1)
+    assert pairs > rejected * 1.5
+
+
+def test_expected_collisions_still_works_but_warns() -> None:
+    with pytest.warns(DeprecationWarning, match="expected_colliding_pairs"):
+        legacy = expected_collisions(2_000, 3)
+
+    assert legacy == expected_colliding_pairs(2_000, 3)
+
+
+@pytest.mark.parametrize("suffix_length", [0, -1])
+def test_expected_rejected_inserts_rejects_invalid_suffix_length(
+    suffix_length: int,
+) -> None:
+    with pytest.raises(
+        ValueError,
+        match="suffix_length must be greater than zero",
+    ):
+        expected_rejected_inserts(10, suffix_length=suffix_length)
+
+
+def test_expected_rejected_inserts_rejects_negative_reference_count() -> None:
+    with pytest.raises(
+        ValueError,
+        match="reference_count must not be negative",
+    ):
+        expected_rejected_inserts(-1, suffix_length=6)
+
+
+# ---------------------------------------------------------------------------
+# 0.3.0: suffix_length_for
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("reference_count", [0, 1])
+def test_suffix_length_for_is_one_below_two_references(
+    reference_count: int,
+) -> None:
+    assert suffix_length_for(reference_count) == 1
+
+
+@pytest.mark.parametrize("reference_count", [10, 50, 200, 500, 5_000])
+def test_suffix_length_for_returns_the_smallest_length_that_fits(
+    reference_count: int,
+) -> None:
+    length = suffix_length_for(reference_count)
+
+    assert collision_probability(reference_count, length) <= 0.01
+    assert collision_probability(reference_count, length - 1) > 0.01
+
+
+def test_suffix_length_for_agrees_with_max_references() -> None:
+    # The two invert each other: the largest volume a length can carry
+    # must not ask for a longer one.
+    for length in range(3, 9):
+        assert suffix_length_for(max_references(length)) <= length
+
+
+def test_suffix_length_for_honours_the_probability() -> None:
+    strict = suffix_length_for(200, max_probability=0.001)
+    lenient = suffix_length_for(200, max_probability=0.10)
+
+    assert lenient < strict
+
+
+def test_suffix_length_for_rejects_negative_reference_count() -> None:
+    with pytest.raises(
+        ValueError,
+        match="reference_count must not be negative",
+    ):
+        suffix_length_for(-1)
+
+
+@pytest.mark.parametrize("max_probability", [0.0, 1.0, -0.1, 1.5])
+def test_suffix_length_for_rejects_invalid_probability(
+    max_probability: float,
+) -> None:
+    with pytest.raises(
+        ValueError,
+        match="max_probability must be between 0 and 1",
+    ):
+        suffix_length_for(200, max_probability=max_probability)
