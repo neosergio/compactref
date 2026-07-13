@@ -1,37 +1,45 @@
 # Roadmap
 
+## Shipped
+
+- `expected_collisions()` and the `attempt` argument of
+  `generate_reference()`, in 0.2.0. See the [changelog](CHANGELOG.md).
+
 ## Planned
 
-### `expected_collisions(reference_count, suffix_length)`
+### `suffix_length_for(reference_count, max_probability=0.01)`
 
-Return the *expected number* of colliding pairs in one bucket, rather
-than the probability that at least one collision occurs.
+Return the smallest suffix length that keeps `reference_count`
+references in one bucket at or below `max_probability`.
 
-`collision_probability()` answers "will anything collide?" — a yes/no
-risk that saturates near 100% and stops being informative. Once a
-format is known to collide, the question becomes "how often?", and that
-is a different quantity:
+`max_references()` answers the question backwards: it takes a length and
+returns a volume, so a caller who knows their volume and wants a length
+has to sweep. The README currently tells them to write that loop:
 
+```python
+for length in range(4, 9):
+    risk = collision_probability(expected_per_day, suffix_length=length)
+    print(f"{length} digits -> {risk:.3%}")
 ```
-expected pairs = n * (n - 1) / (2 * 10 ** suffix_length)
-```
 
-For a reference column with a unique constraint, a collision is a
-failed insert, so this number is really an error rate. It is the figure
-most people want when sizing a suffix:
-
-| Format | 10 refs/day | Expected collisions/month |
-| --- | --- | --- |
-| `RDR-20260713-123` | 300/month over 30 daily buckets | 1.35 |
-| `RDR-202607-1234` | 300 in one monthly bucket | 4.49 |
-| `RDR-20260713-1234` | 300/month over 30 daily buckets | 0.13 |
-| `RDR-20260713-482731` | 300/month over 30 daily buckets | 0.00 |
+Sizing a reference is the first decision every caller makes, and it
+should not require a loop over a helper to arrive at one integer.
 
 Notes for implementation:
 
-- Mirror the validation of `collision_probability()`: reject
-  `suffix_length < 1` and negative `reference_count`; return `0.0` for
-  fewer than two references.
-- The caller supplies the per-bucket count. Callers with a daily bucket
-  who want a monthly total multiply by the number of days themselves —
-  the function should not guess the bucket size from `date_format`.
+- Invert the birthday approximation directly rather than sweeping.
+- Decide what to do when no length is small enough to be useful. A
+  volume that needs 30 digits is a caller who should hear about it, not
+  receive a 30.
+
+### Bucket-aware sizing
+
+Every helper takes a *per-bucket* count, and the bucket is decided by
+`date_format` — a caller on `%Y%m` has one bucket a month, a caller on
+`%Y%m%d-%H` has one an hour. Callers currently convert by hand, and
+getting it wrong is the single most likely way to size a reference
+badly: a monthly bucket holds roughly thirty times the daily volume, so
+it collides far sooner than the extra digit it usually buys back.
+
+Worth considering a helper that takes `date_format` and a rate, and does
+the conversion. Worth *not* doing if it guesses more than it explains.

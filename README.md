@@ -7,6 +7,17 @@ CompactRef is useful when an application keeps a full internal
 identifier but needs a shorter reference for users, support teams,
 documents or searches.
 
+> **CompactRef generates compact references, not globally unique
+> identifiers.**
+>
+> A short reference has fewer possible values than the identifier it is
+> derived from, so two identifiers can produce the same reference. Keep
+> the ULID or UUID as the primary key, put a unique constraint on the
+> reference column, and use [`attempt`](#recovering-from-a-collision) to
+> derive another one when that constraint rejects a write. [Choosing a
+> suffix length](#choosing-a-suffix-length) sizes the reference so this
+> stays rare.
+
 ## Installation
 
 ```bash
@@ -132,6 +143,56 @@ second = generate_reference(
 assert first == second
 ```
 
+## Recovering from a collision
+
+Because a reference is derived from its source, the same source always
+produces the same reference. Retrying a rejected reference therefore
+returns the identical string, however many times you ask.
+
+`attempt` is what makes a unique constraint recoverable. Raising it
+derives a *different* reference from the same source, so when attempt 0
+is already taken you can offer attempt 1:
+
+```python
+from compactref import generate_reference
+
+def assign_reference(session, product):
+    for attempt in range(10):
+        reference = generate_reference(
+            product.id,
+            prefix="RDR",
+            separator="-",
+            attempt=attempt,
+        )
+        if not session.query(exists_reference(reference)).scalar():
+            return reference
+
+    raise RuntimeError("ten attempts collided; the suffix is too short")
+```
+
+Each attempt is deterministic in its own right, so a reference remains
+recomputable later from the source and the attempt that won — store the
+attempt alongside the reference if you need to rederive it.
+
+```python
+first = generate_reference("01J2H8NQPG6B5X8KGN97SX3R5C")
+second = generate_reference("01J2H8NQPG6B5X8KGN97SX3R5C", attempt=1)
+
+assert first != second
+assert second == generate_reference(
+    "01J2H8NQPG6B5X8KGN97SX3R5C",
+    attempt=1,
+)
+```
+
+`attempt` defaults to 0, which reproduces the references CompactRef
+produced before the argument existed. References already stored by
+callers on 0.1.0 remain valid.
+
+Reaching for `attempt` on most writes is a sign the suffix is too short,
+not that the retry loop is working. Size it with `expected_collisions()`
+below.
+
 ## Supported source types
 
 CompactRef accepts:
@@ -165,6 +226,31 @@ collision_probability(50, suffix_length=4)   # 0.1153  -> ~11.5%
 collision_probability(50, suffix_length=6)   # 0.0012  -> ~0.1%
 collision_probability(120, suffix_length=4)  # 0.5103  -> coin flip
 ```
+
+### Count the collisions, not just the risk
+
+`collision_probability()` saturates. Past a certain volume every format
+reports "almost certainly", which stops separating a format that
+collides twice a month from one that collides fifty times.
+
+`expected_collisions(reference_count, suffix_length)` returns how many
+*pairs* are expected to share a suffix in one bucket. With a unique
+constraint in place, a collision is a rejected insert, so this is really
+an error rate — the number of writes per bucket that will need an
+`attempt` retry:
+
+```python
+from compactref import collision_probability, expected_collisions
+
+collision_probability(2_000, suffix_length=3)   # 1.0   -> "certain"
+collision_probability(20_000, suffix_length=3)  # 1.0   -> "certain", equally
+
+expected_collisions(2_000, suffix_length=3)     # 1999  pairs
+expected_collisions(20_000, suffix_length=3)    # 199990 pairs
+```
+
+Both formats are certain to collide. Only the second number tells you
+how badly.
 
 ### Find a safe volume
 
@@ -207,13 +293,21 @@ CompactRef does not replace the original internal identifier.
 
 Shortening an identifier reduces the number of possible values.
 Different internal identifiers can produce the same compact reference.
+No suffix length makes this impossible; a longer one only makes it
+rarer.
 
 Applications requiring unique references should:
 
-1. Keep the original ULID or UUID as the internal identifier.
-2. Add a unique constraint to the reference column.
-3. Detect and handle the unlikely possibility of a collision.
-4. Increase `suffix_length` when the expected volume requires it.
+1. Keep the original ULID or UUID as the internal identifier. The
+   reference is for humans; the identifier is for the database.
+2. Add a unique constraint to the reference column, so a collision
+   surfaces as a rejected write rather than two products quietly sharing
+   a reference.
+3. Handle that rejection by retrying with a higher `attempt`, as in
+   [Recovering from a collision](#recovering-from-a-collision).
+4. Size `suffix_length` for the expected volume *per bucket*, using
+   `expected_collisions()`, so step 3 stays a rare path rather than the
+   normal one.
 
 ## Requirements
 

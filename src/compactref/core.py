@@ -12,6 +12,9 @@ SourceIdentifier: TypeAlias = str | bytes | int | UUID
 DEFAULT_SUFFIX_LENGTH = 6
 DEFAULT_DATE_FORMAT = "%Y%m%d"
 
+# blake2b takes at most 16 bytes of salt, which is where the attempt goes.
+MAX_ATTEMPT = 2**128 - 1
+
 
 def generate_reference(
     source: SourceIdentifier,
@@ -21,12 +24,13 @@ def generate_reference(
     date_format: str = DEFAULT_DATE_FORMAT,
     prefix: str = "",
     separator: str = "",
+    attempt: int = 0,
 ) -> str:
     """
     Generate a compact human-facing reference from a stable identifier.
 
-    The same source, date and configuration always produce the same
-    reference.
+    The same source, date, attempt and configuration always produce the
+    same reference.
 
     Args:
         source:
@@ -49,6 +53,16 @@ def generate_reference(
         separator:
             Optional value placed between the prefix, date and suffix.
 
+        attempt:
+            Which reference to derive for this source. Because the
+            suffix is derived from the source, the same source always
+            yields the same reference, and retrying a rejected one is
+            pointless. Raising the attempt derives a different reference
+            from the same source, so a caller whose unique constraint
+            rejected attempt 0 can offer attempt 1, and so on. Every
+            attempt is itself deterministic, so a reference can be
+            recomputed later from the source and the attempt that won.
+
     Returns:
         A compact reference such as ``20260710482731`` or
         ``INC-20260710-482731``.
@@ -58,22 +72,28 @@ def generate_reference(
             If source has an unsupported type.
 
         ValueError:
-            If source is empty or suffix_length is less than one.
+            If source is empty, suffix_length is less than one, or
+            attempt is negative or larger than MAX_ATTEMPT.
 
     Warning:
         Shortening an identifier reduces its uniqueness space. This
         function does not mathematically guarantee that two different
         source identifiers cannot produce the same compact reference.
+        See collision_probability() and expected_collisions().
     """
     if suffix_length < 1:
         raise ValueError("suffix_length must be greater than zero")
+    if attempt < 0:
+        raise ValueError("attempt must not be negative")
+    if attempt > MAX_ATTEMPT:
+        raise ValueError(f"attempt must not be greater than {MAX_ATTEMPT}")
 
     source_bytes = _normalize_source(source)
 
     current_datetime = generated_at or datetime.now()
     date_part = current_datetime.strftime(date_format)
 
-    numeric_value = _source_to_integer(source_bytes)
+    numeric_value = _source_to_integer(source_bytes, attempt)
     numeric_suffix = numeric_value % (10**suffix_length)
     suffix = f"{numeric_suffix:0{suffix_length}d}"
 
@@ -101,6 +121,33 @@ def collision_probability(reference_count: int, suffix_length: int) -> float:
     space = 10**suffix_length
     exponent = -reference_count * (reference_count - 1) / (2 * space)
     return 1.0 - exp(exponent)
+
+
+def expected_collisions(reference_count: int, suffix_length: int) -> float:
+    """
+    Approximate how many pairs of ``reference_count`` references share a
+    suffix, within a single date and prefix bucket.
+
+    collision_probability() answers whether anything collides at all. It
+    saturates: once a format is crowded, every volume reports "almost
+    certainly", which stops distinguishing a format that collides twice
+    a month from one that collides fifty times. This answers how often
+    instead.
+
+    For a reference column with a unique constraint, a collision is a
+    rejected insert, so the result is really an error rate: the number
+    of writes per bucket a caller should expect to retry (see the
+    ``attempt`` argument of generate_reference()).
+    """
+    if suffix_length < 1:
+        raise ValueError("suffix_length must be greater than zero")
+    if reference_count < 0:
+        raise ValueError("reference_count must not be negative")
+    if reference_count < 2:
+        return 0.0
+
+    space: int = 10**suffix_length
+    return reference_count * (reference_count - 1) / (2 * space)
 
 
 def max_references(suffix_length: int, max_probability: float = 0.01) -> int:
@@ -154,17 +201,30 @@ def _normalize_source(source: SourceIdentifier) -> bytes:
     )
 
 
-def _source_to_integer(source: bytes) -> int:
+def _source_to_integer(source: bytes, attempt: int = 0) -> int:
     """
     Convert normalized bytes into a deterministic integer.
 
     BLAKE2b is used so identifiers of different formats are processed
     consistently.
+
+    The attempt goes in the salt rather than into the message. Appending
+    it to the source would make generate_reference(b"abc", attempt=1)
+    and generate_reference(b"abc#1") agree, inventing a fresh class of
+    collision inside the feature meant to resolve them. The salt is a
+    separate input to the compression function, so the attempts of one
+    source cannot be spelled as the source of another.
+
+    An attempt of 0 salts with sixteen zero bytes, which BLAKE2b treats
+    exactly as the unsalted digest it computed before this parameter
+    existed. References written by earlier versions therefore still
+    recompute to the same value.
     """
     digest = blake2b(
         source,
         digest_size=16,
         person=b"compactref-v1",
+        salt=attempt.to_bytes(16, byteorder="big"),
     ).digest()
 
     return int.from_bytes(digest, byteorder="big")
