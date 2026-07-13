@@ -6,75 +6,99 @@ See the [changelog](CHANGELOG.md) for what has shipped.
 
 ## Shipped
 
-- **0.2.0** — the `attempt` argument, so a reference a unique constraint
-  rejected can be regenerated. `expected_collisions()`.
-- **0.2.1** — booleans rejected as sources; `expected_collisions()`
-  documented as the pair count it always was.
-- **0.3.0** — the `tz` argument. The system timezone is no longer read,
-  so a reference no longer depends on the machine that produced it.
+- **0.2.0** — `attempt`, so a reference a unique constraint rejected can
+  be regenerated. Retrying without it returns the same string forever.
+- **0.2.1** — booleans rejected as sources (`True` was returning the
+  reference belonging to `1`). `expected_collisions()` documented as the
+  pair count it always was, rather than the retry count it never was.
+- **0.3.0** — `tz`. The system timezone is no longer read, so a reference
+  no longer depends on the machine that produced it.
   `expected_rejected_inserts()`, `suffix_length_for()`.
+- **0.4.0** — `alphabet` (Crockford base32), `check` and
+  `verify_reference()`, `namespace` (`prefix` never reached the hash, so
+  an order and an invoice from one customer drew the same suffix). `base`
+  on every sizing helper.
 
-## 0.4.0 — make it worth being human-facing
+## 0.5.0 — ergonomics and confidence
 
-### An `alphabet` argument
+Everything here is additive. Nothing changes what a reference looks like,
+which is the point: the format is now settled.
 
-The suffix is decimal, so six characters carry a million values. Six
-Crockford base32 characters carry 1.07 *billion* — the same length, the
-same shape, 32× the safe volume:
+### A `CompactRef` class
 
-| Length | digits | Crockford base32 |
-| --- | --- | --- |
-| 4 | 14 refs/bucket | 145 |
-| 6 | 142 | 4,646 |
-| 7 | 448 | 26,280 |
+Every call repeats the same five arguments:
 
-This is the single biggest lever on the collision problem the README
-spends so many words apologising for.
+```python
+generate_reference(order.id, prefix="ORD", separator="-",
+                   alphabet=CROCKFORD_BASE32, namespace="orders", check=True)
+```
 
-It is a real trade, though, not a free win, and digits must stay the
-default so nobody's stored references move:
+A configured instance says it once:
 
-- Digits are unambiguous, universally typeable, and work on a numeric
-  keypad — which matters if a reference is ever read into a phone menu or
-  a numbers-only field.
-- Letters are denser but harder to convey aloud, and can spell things.
-  Crockford drops I, L, O and U precisely to kill 1/I and 0/O confusion
-  and most accidental obscenity, which is why it is the right base32 to
-  reach for.
+```python
+orders = CompactRef(prefix="ORD", separator="-",
+                    alphabet=CROCKFORD_BASE32, namespace="orders", check=True)
 
-### A check character
+orders.generate(order.id)
+orders.verify(reference)
+orders.suffix_length_for(200)   # knows its own base
+```
 
-CompactRef exists for references humans read aloud, type into support
-forms, and write on paper — and there is no way to tell a mistyped one
-from a missing one. A support agent who fat-fingers `RDR-20260713-177`
-gets "not found", which is indistinguishable from "no such product".
+The functions stay. The class is a convenience over them, not a
+replacement, and it is what makes `verify()` pleasant — today a caller has
+to pass the alphabet, separator and prefix back in by hand, and getting
+any of them wrong silently returns False.
 
-A check character (Damm, or mod-97) turns that into "that is not a valid
-reference" — a different answer, and an actionable one. IBAN, ISBN and
-card numbers all carry one, for exactly this reason. Its absence is the
-most conspicuous gap in a library with this name.
+### Property-based tests
+
+Hypothesis, over the invariants the hand-written tests only sample:
+
+- every reference decodes to `suffix_length` characters of the alphabet;
+- `verify()` accepts what `generate(check=True)` produced, for any source,
+  alphabet, prefix and separator;
+- a single-character edit never verifies;
+- `attempt` never repeats a reference within a bucket.
+
+### Integration documentation
+
+The retry loop in the README is pseudocode. Real, runnable examples for
+SQLAlchemy and Django — a unique constraint, an `IntegrityError`, and the
+`attempt` retry — are what a caller actually copies.
 
 ## 1.0.0 — the lock
 
-Ship it when the API is one we are content never to break: compact
-(base32), human-proof (check character), correct (no environment read),
-and honest about collisions rather than merely apologetic.
-
-At that point:
+Ship it when the API is one we are content never to break. At that point:
 
 - Remove `expected_collisions()`, deprecated since 0.3.0.
+- Settle the exception contract in writing: `TypeError` when the type is
+  unusable, `ValueError` when the type is right but the value is not.
 
 ## Considered, not planned
+
+### A Damm check character
+
+Luhn cannot see a `09 ↔ 90` transposition — about 2.7% of adjacent swaps
+in decimal, 0.3% in base32. Damm sees all of them.
+
+It needs a totally anti-symmetric quasigroup of the alphabet's order,
+though, and there is no way to construct one for an arbitrary alphabet at
+call time. Shipping Damm would mean shipping a fixed table per supported
+alphabet and refusing custom ones. That is a real cost for a real but
+small gain, and single-character errors — 100% caught either way — are the
+typo that actually happens.
 
 ### Bucket-aware sizing
 
 Every sizing helper takes a count *per bucket*, and `date_format` decides
-the bucket — a caller on `%Y%m` has one bucket a month, a caller on
-`%Y%m%d-%H` has one an hour. Converting by hand is the commonest way to
-size a reference badly: a monthly bucket holds roughly thirty times the
-daily volume, so it collides far sooner than the extra digit it usually
-buys back.
+the bucket. Converting by hand is the commonest way to size a reference
+badly: a monthly bucket holds roughly thirty times the daily volume, so it
+collides far sooner than the extra character it usually buys back.
 
-A helper that took `date_format` and a rate could do the conversion.
-Worth *not* doing if it guesses more than it explains; the docs may be
-the better fix.
+A helper taking `date_format` and a rate could do the conversion. Worth
+*not* doing if it guesses more than it explains; the docs may be the
+better fix.
+
+### A CLI
+
+Plausible, but nobody has asked. A library that generates a reference from
+an identifier is not obviously something you reach for at a shell prompt.

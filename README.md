@@ -259,6 +259,140 @@ Reaching for `attempt` on most writes is a sign the suffix is too short,
 not that the retry loop is working. Size it with `expected_collisions()`
 below.
 
+## More room per character
+
+The suffix is decimal by default, so six characters hold a million
+values. `CROCKFORD_BASE32` holds 1.07 *billion* in the same six — thirty-
+two times the volume, at the same length:
+
+```python
+from compactref import CROCKFORD_BASE32, generate_reference
+
+generate_reference("01J2H8NQPG6B5X8KGN97SX3R5C", prefix="RDR", separator="-")
+# 'RDR-20260713-385177'   6 chars, 1,000,000 slots
+
+generate_reference(
+    "01J2H8NQPG6B5X8KGN97SX3R5C",
+    prefix="RDR",
+    separator="-",
+    alphabet=CROCKFORD_BASE32,
+)
+# 'RDR-20260713-HCP3CS'   6 chars, 1,073,741,824 slots
+```
+
+| Suffix length | Digits | Crockford base32 |
+| --- | --- | --- |
+| 4 | 14 refs/bucket | 145 |
+| 6 | 142 | 4,646 |
+| 7 | 448 | 26,280 |
+
+Crockford's alphabet drops `I`, `L`, `O` and `U` — `I` and `L` because
+they read as `1`, `O` because it reads as `0`, and `U` so the encoding
+does not spell obscenities by accident.
+
+It is not a free win, so choose deliberately. Digits can be typed on a
+numeric keypad and read down a phone line without spelling anything;
+letters cannot. Digits remain the default, so nothing you have already
+stored moves.
+
+**Tell the sizing helpers about it.** They assume base 10 unless told
+otherwise:
+
+```python
+from compactref import max_references, suffix_length_for
+
+suffix_length_for(200)             # 7  -> decimal
+suffix_length_for(200, base=32)    # 5  -> the same volume, two chars shorter
+max_references(6, base=32)         # 4646
+```
+
+## Catching a mistyped reference
+
+Without a check character, a support agent who fat-fingers a digit gets
+"no such record" — which is indistinguishable from a record that does not
+exist. `check=True` makes a mistyped reference *invalid* rather than
+merely absent, which is a different answer and an actionable one:
+
+```python
+from compactref import generate_reference, verify_reference
+
+reference = generate_reference(
+    "01J2H8NQPG6B5X8KGN97SX3R5C",
+    prefix="RDR",
+    separator="-",
+    check=True,
+)
+# 'RDR-20260713-3851772'   <- the last character is the check
+
+verify_reference(reference, prefix="RDR", separator="-")          # True
+verify_reference("RDR-20260713-3851779", prefix="RDR", separator="-")  # False
+```
+
+The check covers the **date as well as the suffix**, so a mistyped day —
+which would send the lookup into the wrong bucket — is caught too.
+
+What it catches, measured rather than assumed:
+
+- **Every** single-character error, in any alphabet. This is the common
+  typo.
+- Every adjacent transposition **except** the swap of the alphabet's first
+  and last characters: `09 ↔ 90` in decimal, `0Z ↔ Z0` in base32. That is
+  the well-known blind spot of Luhn — the scheme on the back of a credit
+  card — and costs about 2.7% of transpositions in decimal, 0.3% in
+  base32.
+
+> **It adds a character but no capacity.** The check character is computed
+> from the reference, not drawn from the hash. A six-character suffix plus
+> a check is seven characters holding a million values, not ten million.
+> Size with `suffix_length`, which is unchanged.
+
+## Separating references that share a source
+
+`prefix` is only a label — **it never reaches the hash**. So an order and
+an invoice derived from the same customer's ULID draw the *same* suffix,
+every single time:
+
+```python
+generate_reference("customer-42", prefix="ORD", separator="-")
+# 'ORD-20260713-133083'
+generate_reference("customer-42", prefix="INV", separator="-")
+# 'INV-20260713-133083'   <- the same digits, by construction
+```
+
+That is a certainty, not a one-in-a-million coincidence, and none of the
+collision helpers account for it. `namespace` is what actually separates
+them:
+
+```python
+generate_reference(
+    "customer-42", prefix="ORD", separator="-", namespace="orders",
+)
+# 'ORD-20260713-513524'
+
+generate_reference(
+    "customer-42", prefix="INV", separator="-", namespace="invoices",
+)
+# 'INV-20260713-205954'
+```
+
+The namespace is carried in the hash itself (BLAKE2b's key), so one
+namespace cannot be spelled as part of another source. An empty
+namespace — the default — reproduces every reference made before 0.4.0.
+
+## A reference without a date
+
+Pass an empty `date_format`. The date part drops out of the join:
+
+```python
+generate_reference("01J2H8NQPG6B5X8KGN97SX3R5C", prefix="RDR", separator="-",
+                   date_format="")
+# 'RDR-385177'
+```
+
+Be careful: the date is what keeps buckets small. Without it every
+reference you ever issue shares one bucket, so size `suffix_length` for
+your **all-time** total rather than a day's worth.
+
 ## Supported source types
 
 CompactRef accepts:

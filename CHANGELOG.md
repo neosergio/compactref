@@ -5,6 +5,69 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-07-13
+
+Nothing here moves a reference you have already stored. Every new
+argument defaults to what earlier versions did, and a test pins the
+strings 0.1.0 produced.
+
+### Added
+
+- **`namespace`** — and the bug it fixes. `prefix` is only a label: it
+  never reached the hash. So an order and an invoice derived from one
+  customer's ULID drew the *same* suffix, every time:
+
+      ORD-20260713-133083
+      INV-20260713-133083
+
+  That is a certainty, not a one-in-a-million coincidence, and none of the
+  collision helpers accounted for it. A namespace separates them. It is
+  carried in BLAKE2b's key, so one namespace cannot be spelled as part of
+  another source, and an empty namespace — the default — is an empty key,
+  which BLAKE2b treats as no key at all.
+
+- **`alphabet`**, with `CROCKFORD_BASE32` and `DIGITS`. Six decimal
+  characters hold a million values; six Crockford characters hold 1.07
+  billion, which is 32× the volume a bucket carries at the same risk and
+  the same length. Crockford drops `I`, `L`, `O` and `U` — the first three
+  because they are misread as `1` and `0`, the last so the encoding does
+  not spell obscenities.
+
+  It is a trade, not a free win: digits can be typed on a numeric keypad
+  and read down a phone line without spelling anything. Digits stay the
+  default.
+
+- **`check`** and **`verify_reference()`**. Without a check character a
+  mistyped reference is merely *absent*, which a caller cannot tell from a
+  record that never existed. With one it is *invalid*, which is a
+  different answer and an actionable one.
+
+  Luhn mod N over the alphabet, covering the date as well as the suffix,
+  so a mistyped day is caught too. Measured, not assumed: it catches
+  **every** single-character error, and every adjacent transposition
+  except the swap of the alphabet's first and last characters (`09 ↔ 90`
+  in decimal, `0Z ↔ Z0` in base32) — the known blind spot of the scheme on
+  the back of a credit card, costing ~2.7% of transpositions in decimal
+  and 0.3% in base32.
+
+  It adds a character but **no capacity**: it is computed from the
+  reference, not drawn from the hash, so the collision maths still depend
+  on `suffix_length` alone.
+
+- `base` on every sizing helper — `collision_probability()`,
+  `expected_colliding_pairs()`, `expected_rejected_inserts()`,
+  `max_references()` and `suffix_length_for()`. They assumed ten, and a
+  base32 suffix sized as if it were decimal is sized wrong by orders of
+  magnitude. Defaults to 10.
+
+- `MAX_NAMESPACE_BYTES`, `DEFAULT_ALPHABET`.
+
+### Documented
+
+- A reference without a date, via `date_format=""`. This always worked;
+  nothing said so. Mind that it puts every reference you ever issue in one
+  bucket, so size for the all-time total, not a day's worth.
+
 ## [0.3.0] - 2026-07-13
 
 ### Changed — breaking
@@ -135,6 +198,7 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - `collision_probability()` and `max_references()` size the suffix using
   the birthday model.
 
+[0.4.0]: https://github.com/neosergio/compactref/releases/tag/v0.4.0
 [0.3.0]: https://github.com/neosergio/compactref/releases/tag/v0.3.0
 [0.2.1]: https://github.com/neosergio/compactref/releases/tag/v0.2.1
 [0.2.0]: https://github.com/neosergio/compactref/releases/tag/v0.2.0

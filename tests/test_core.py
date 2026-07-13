@@ -8,8 +8,12 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from compactref import (
+    CROCKFORD_BASE32,
+    DEFAULT_ALPHABET,
     DEFAULT_TIMEZONE,
+    DIGITS,
     MAX_ATTEMPT,
+    MAX_NAMESPACE_BYTES,
     SourceIdentifier,
     collision_probability,
     expected_colliding_pairs,
@@ -18,6 +22,7 @@ from compactref import (
     generate_reference,
     max_references,
     suffix_length_for,
+    verify_reference,
 )
 
 
@@ -761,3 +766,352 @@ def test_suffix_length_for_rejects_invalid_probability(
         match="max_probability must be between 0 and 1",
     ):
         suffix_length_for(200, max_probability=max_probability)
+
+
+# ---------------------------------------------------------------------------
+# 0.4.0: alphabet
+# ---------------------------------------------------------------------------
+
+
+def test_digits_remain_the_default() -> None:
+    assert DEFAULT_ALPHABET == DIGITS
+    assert generate_reference(
+        FIXED_ULID, generated_at=FIXED_DATETIME
+    ).isdigit()
+
+
+def test_crockford_omits_the_letters_a_human_misreads() -> None:
+    # I and L read as 1, O reads as 0, and U is dropped so the encoding
+    # does not spell obscenities.
+    for character in "ILOU":
+        assert character not in CROCKFORD_BASE32
+
+    assert len(CROCKFORD_BASE32) == 32
+    assert len(set(CROCKFORD_BASE32)) == 32
+
+
+def test_alphabet_changes_the_suffix_but_not_its_length() -> None:
+    digits = generate_reference(FIXED_ULID, generated_at=FIXED_DATETIME)
+    base32 = generate_reference(
+        FIXED_ULID,
+        generated_at=FIXED_DATETIME,
+        alphabet=CROCKFORD_BASE32,
+    )
+
+    assert digits[8:] != base32[8:]
+    assert len(digits) == len(base32)
+    assert all(character in CROCKFORD_BASE32 for character in base32[8:])
+
+
+def test_alphabet_is_deterministic() -> None:
+    first = generate_reference(
+        FIXED_ULID,
+        generated_at=FIXED_DATETIME,
+        alphabet=CROCKFORD_BASE32,
+    )
+    second = generate_reference(
+        FIXED_ULID,
+        generated_at=FIXED_DATETIME,
+        alphabet=CROCKFORD_BASE32,
+    )
+
+    assert first == second
+
+
+@pytest.mark.parametrize("alphabet", ["", "0"])
+def test_rejects_an_alphabet_too_short_to_count_in(alphabet: str) -> None:
+    with pytest.raises(
+        ValueError,
+        match="alphabet must have at least two characters",
+    ):
+        generate_reference(FIXED_ULID, alphabet=alphabet)
+
+
+def test_rejects_an_alphabet_with_a_repeated_character() -> None:
+    with pytest.raises(
+        ValueError,
+        match="alphabet must not repeat a character",
+    ):
+        generate_reference(FIXED_ULID, alphabet="0123456780")
+
+
+def test_base32_holds_far_more_per_character() -> None:
+    # The reason the alphabet exists: the same length, far more room.
+    assert max_references(6, base=32) > max_references(6, base=10) * 30
+    assert suffix_length_for(200, base=32) < suffix_length_for(200, base=10)
+
+
+# ---------------------------------------------------------------------------
+# 0.4.0: check character
+# ---------------------------------------------------------------------------
+
+
+def test_check_appends_exactly_one_character() -> None:
+    plain = generate_reference(FIXED_ULID, generated_at=FIXED_DATETIME)
+    checked = generate_reference(
+        FIXED_ULID,
+        generated_at=FIXED_DATETIME,
+        check=True,
+    )
+
+    assert len(checked) == len(plain) + 1
+    assert checked.startswith(plain)
+
+
+def test_a_checked_reference_verifies() -> None:
+    reference = generate_reference(
+        FIXED_ULID,
+        generated_at=FIXED_DATETIME,
+        prefix="RDR",
+        separator="-",
+        check=True,
+    )
+
+    assert verify_reference(reference, prefix="RDR", separator="-")
+
+
+@pytest.mark.parametrize("alphabet", [DIGITS, CROCKFORD_BASE32])
+def test_check_catches_every_single_character_error(alphabet: str) -> None:
+    """The common typo. Luhn mod N catches all of them, in any base."""
+    reference = generate_reference(
+        FIXED_ULID,
+        generated_at=FIXED_DATETIME,
+        alphabet=alphabet,
+        check=True,
+    )
+
+    for position in range(len(reference)):
+        for character in alphabet:
+            if character == reference[position]:
+                continue
+
+            mistyped = (
+                reference[:position] + character + reference[position + 1 :]
+            )
+
+            assert not verify_reference(mistyped, alphabet=alphabet), mistyped
+
+
+def test_check_covers_the_date_as_well_as_the_suffix() -> None:
+    # A mistyped day is a transcription error too, and it sends the lookup
+    # into the wrong bucket.
+    reference = generate_reference(
+        FIXED_ULID,
+        generated_at=FIXED_DATETIME,
+        check=True,
+    )
+
+    assert reference.startswith("20260710")
+
+    wrong_day = "20260711" + reference[8:]
+
+    assert not verify_reference(wrong_day)
+
+
+def test_check_misses_only_the_luhn_blind_spot() -> None:
+    """Luhn cannot see a 09 <-> 90 swap. Say so, rather than imply otherwise.
+
+    Every other adjacent transposition is caught. Damm would close this
+    gap, but a Damm check needs a totally anti-symmetric quasigroup of the
+    alphabet's order, which cannot be built for an arbitrary alphabet at
+    call time. Credit cards live with the same hole.
+    """
+    undetected = set()
+
+    for index in range(200):
+        reference = generate_reference(
+            f"source-{index}",
+            generated_at=FIXED_DATETIME,
+            check=True,
+        )
+
+        for position in range(8, len(reference) - 1):
+            left, right = reference[position], reference[position + 1]
+            if left == right:
+                continue
+
+            swapped = (
+                reference[:position] + right + left + reference[position + 2 :]
+            )
+
+            if verify_reference(swapped):
+                undetected.add(frozenset((left, right)))
+
+    assert undetected == {frozenset(("0", "9"))}
+
+
+def test_the_check_character_adds_no_capacity() -> None:
+    # It is computed from the reference, not drawn from the hash. Seven
+    # characters of which one is a check still hold a million values.
+    plain = {
+        generate_reference(
+            f"source-{index}",
+            generated_at=FIXED_DATETIME,
+            suffix_length=3,
+        )
+        for index in range(500)
+    }
+    checked = {
+        generate_reference(
+            f"source-{index}",
+            generated_at=FIXED_DATETIME,
+            suffix_length=3,
+            check=True,
+        )
+        for index in range(500)
+    }
+
+    assert len(plain) == len(checked)
+
+
+def test_verify_rejects_a_string_too_short_to_carry_a_check() -> None:
+    assert not verify_reference("")
+    assert not verify_reference("7")
+
+
+# ---------------------------------------------------------------------------
+# 0.4.0: namespace
+# ---------------------------------------------------------------------------
+
+
+def test_namespace_separates_references_that_share_a_source() -> None:
+    """The bug 0.4.0 fixes.
+
+    prefix never reached the hash, so an order and an invoice derived from
+    one customer's ULID drew the same suffix every time. That is a
+    certainty, not a one-in-a-million coincidence, and none of the
+    collision helpers accounted for it.
+    """
+    order = generate_reference(
+        "customer-42",
+        generated_at=FIXED_DATETIME,
+        prefix="ORD",
+        separator="-",
+    )
+    invoice = generate_reference(
+        "customer-42",
+        generated_at=FIXED_DATETIME,
+        prefix="INV",
+        separator="-",
+    )
+
+    # Still true, and still surprising: the prefix is only a label.
+    assert order.split("-")[-1] == invoice.split("-")[-1]
+
+    # Namespaces are what actually separate them.
+    namespaced_order = generate_reference(
+        "customer-42",
+        generated_at=FIXED_DATETIME,
+        prefix="ORD",
+        separator="-",
+        namespace="orders",
+    )
+    namespaced_invoice = generate_reference(
+        "customer-42",
+        generated_at=FIXED_DATETIME,
+        prefix="INV",
+        separator="-",
+        namespace="invoices",
+    )
+
+    assert (
+        namespaced_order.split("-")[-1] != (namespaced_invoice.split("-")[-1])
+    )
+
+
+def test_the_empty_namespace_reproduces_pre_namespace_references() -> None:
+    # blake2b treats an empty key as no key, which is what earlier versions
+    # hashed with. Stored references must survive the upgrade.
+    assert generate_reference("customer-42", generated_at=FIXED_DATETIME) == (
+        generate_reference(
+            "customer-42",
+            generated_at=FIXED_DATETIME,
+            namespace="",
+        )
+    )
+
+
+def test_namespace_is_deterministic() -> None:
+    first = generate_reference(
+        FIXED_ULID,
+        generated_at=FIXED_DATETIME,
+        namespace="orders",
+    )
+    second = generate_reference(
+        FIXED_ULID,
+        generated_at=FIXED_DATETIME,
+        namespace="orders",
+    )
+
+    assert first == second
+
+
+def test_a_namespace_cannot_be_spelled_as_part_of_another_source() -> None:
+    # The namespace is the hash key, not a prefix on the message. Were it
+    # appended, these two would agree.
+    keyed = generate_reference(
+        "b",
+        generated_at=FIXED_DATETIME,
+        namespace="a",
+    )
+    concatenated = generate_reference("ab", generated_at=FIXED_DATETIME)
+
+    assert keyed != concatenated
+
+
+def test_rejects_a_namespace_longer_than_the_hash_key() -> None:
+    with pytest.raises(
+        ValueError,
+        match="namespace must not exceed",
+    ):
+        generate_reference(
+            FIXED_ULID,
+            namespace="n" * (MAX_NAMESPACE_BYTES + 1),
+        )
+
+
+def test_a_namespace_at_the_limit_is_accepted() -> None:
+    reference = generate_reference(
+        FIXED_ULID,
+        generated_at=FIXED_DATETIME,
+        namespace="n" * MAX_NAMESPACE_BYTES,
+    )
+
+    assert reference.startswith("20260710")
+
+
+# ---------------------------------------------------------------------------
+# 0.4.0: the sizing helpers learned about the base
+# ---------------------------------------------------------------------------
+
+
+def test_the_helpers_default_to_base_ten() -> None:
+    assert collision_probability(50, 4) == collision_probability(
+        50, 4, base=10
+    )
+    assert max_references(6) == max_references(6, base=10)
+    assert suffix_length_for(200) == suffix_length_for(200, base=10)
+
+
+def test_a_larger_base_holds_more_at_the_same_length() -> None:
+    assert collision_probability(200, 6, base=32) < (
+        collision_probability(200, 6, base=10)
+    )
+    assert expected_rejected_inserts(200, 6, base=32) < (
+        expected_rejected_inserts(200, 6, base=10)
+    )
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda: collision_probability(10, 4, base=1),
+        lambda: expected_colliding_pairs(10, 4, base=1),
+        lambda: expected_rejected_inserts(10, 4, base=1),
+        lambda: max_references(4, base=1),
+        lambda: suffix_length_for(10, base=1),
+    ],
+)
+def test_helpers_reject_a_base_below_two(call: Callable[[], float]) -> None:
+    with pytest.raises(ValueError, match="base must be at least two"):
+        call()
