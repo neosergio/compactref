@@ -18,6 +18,12 @@ documents or searches.
 > suffix length](#choosing-a-suffix-length) sizes the reference so this
 > stays rare.
 
+![PyPI Version](https://img.shields.io/pypi/v/compactref)
+![PyPI License](https://img.shields.io/pypi/l/compactref)
+![PyPI Python Version](https://img.shields.io/pypi/pyversions/compactref)
+![PyPI Status](https://img.shields.io/pypi/status/compactref)
+[![PyPI Downloads](https://static.pepy.tech/personalized-badge/compactref?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=total-downloads)](https://pepy.tech/projects/compactref)
+
 ## Installation
 
 ```bash
