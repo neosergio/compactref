@@ -5,6 +5,7 @@ import pytest
 
 from compactref import (
     MAX_ATTEMPT,
+    SourceIdentifier,
     collision_probability,
     expected_collisions,
     generate_reference,
@@ -174,13 +175,10 @@ def test_rejects_unsupported_source_type() -> None:
     ],
 )
 def test_default_attempt_reproduces_pre_attempt_references(
-    source: object,
+    source: SourceIdentifier,
     expected: str,
 ) -> None:
-    assert (
-        generate_reference(source, generated_at=FIXED_DATETIME)  # type: ignore[arg-type]
-        == expected
-    )
+    assert generate_reference(source, generated_at=FIXED_DATETIME) == expected
 
 
 def test_attempt_zero_is_the_default() -> None:

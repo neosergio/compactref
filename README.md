@@ -317,7 +317,25 @@ Applications requiring unique references should:
 
 ## Requirements
 
-Python 3.10 or newer.
+Python 3.10 or newer. No runtime dependencies.
+
+## Changelog
+
+See
+[CHANGELOG.md](https://github.com/neosergio/compactref/blob/main/CHANGELOG.md).
+
+Version 0.2.0 added the `attempt` argument and `expected_collisions()`.
+References produced by 0.1.0 are unchanged: `attempt` defaults to 0, which
+reproduces them byte for byte, so anything already stored stays valid.
+
+## Contributing
+
+Issues and pull requests are welcome at
+[github.com/neosergio/compactref](https://github.com/neosergio/compactref).
+
+Maintainers: see
+[RELEASING.md](https://github.com/neosergio/compactref/blob/main/RELEASING.md)
+for how a version reaches PyPI.
 
 ## License
 
