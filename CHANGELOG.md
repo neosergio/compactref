@@ -5,6 +5,56 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-07-13
+
+### Changed — breaking
+
+- **The date part is now UTC by default, and the system timezone is never
+  read.**
+
+  Before 0.3.0 the default clock was `datetime.now()` — naive *local*
+  time — so a reference depended on the machine that produced it. The
+  same identifier, at the same instant, became `20260713…` on a Lima
+  server and `20260714…` on a Tokyo one. Determinism is what this library
+  is for, and it did not hold across a fleet.
+
+  `generate_reference()` takes a `tz` argument, defaulting to UTC.
+  `generated_at=None` now reads `datetime.now(tz)`; an aware `generated_at`
+  is converted into `tz`; a naive one is taken at face value, as a wall
+  clock the caller chose. Nothing consults the environment.
+
+  **Who this moves.** If your servers do not run in UTC, new references
+  land in a different bucket than they used to — about 21% of them for a
+  UTC−5 server and 38% for UTC+9, that being how often the local date
+  differs from the UTC date. Stored references are untouched; only what
+  new calls return changes. Callers who *recompute* a reference instead of
+  storing it should pin the old behaviour with the zone their servers ran
+  in, for example `tz=ZoneInfo("America/Lima")`. Callers who store it, as
+  the README has always advised, need do nothing.
+
+### Added
+
+- `expected_rejected_inserts(reference_count, suffix_length)` — how many
+  inserts a unique constraint rejects, which is the number of `attempt`
+  retries a caller will actually make, and so the number to plan with.
+  Unlike the pair count it can never exceed the reference count, because
+  an insert can only be rejected once. Verified against simulation.
+
+- `suffix_length_for(reference_count, max_probability=0.01)` — the
+  smallest suffix length that holds a given volume. `max_references()`
+  answers this backwards, taking a length and returning a volume, so the
+  README used to tell callers to write a loop. It no longer does.
+
+- `DEFAULT_TIMEZONE`.
+
+### Deprecated
+
+- `expected_collisions()` is renamed to `expected_colliding_pairs()`. The
+  old name suggested a count of collisions a caller would have to handle,
+  and until 0.2.1 the documentation said exactly that. It counts pairs,
+  which runs far ahead of the rejected inserts once a bucket fills. The
+  old name still works, warns, and goes away in 1.0.0.
+
 ## [0.2.1] - 2026-07-13
 
 ### Fixed
@@ -85,6 +135,7 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - `collision_probability()` and `max_references()` size the suffix using
   the birthday model.
 
+[0.3.0]: https://github.com/neosergio/compactref/releases/tag/v0.3.0
 [0.2.1]: https://github.com/neosergio/compactref/releases/tag/v0.2.1
 [0.2.0]: https://github.com/neosergio/compactref/releases/tag/v0.2.0
 [0.1.0]: https://github.com/neosergio/compactref/releases/tag/v0.1.0

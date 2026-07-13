@@ -127,7 +127,7 @@ from_bytes = generate_reference(b"internal-record-123")
 ## Deterministic generation
 
 The same identifier, date and configuration produce the same
-reference:
+reference — on every machine:
 
 ```python
 from datetime import datetime
@@ -148,6 +148,66 @@ second = generate_reference(
 
 assert first == second
 ```
+
+## Timezones
+
+The date part is a *bucket label*, so every caller has to agree on which
+bucket an instant falls in. CompactRef therefore never reads the system
+timezone. `tz` decides how the date is expressed, and defaults to UTC:
+
+```python
+from datetime import datetime, timezone
+
+from compactref import generate_reference
+
+instant = datetime(2026, 7, 13, 23, 30, tzinfo=timezone.utc)
+
+# The same instant, from a server anywhere in the world.
+generate_reference("01J2H8NQPG6B5X8KGN97SX3R5C", generated_at=instant)
+# 'RDR-20260713-385177'  in Lima, in Tokyo, in Auckland
+```
+
+An aware `generated_at` is converted into `tz` first, so two servers
+holding the same instant agree. A naive one is taken at face value, as a
+wall clock you chose — CompactRef will not guess what it meant.
+
+### Following a business day instead of UTC
+
+Pass a zone when the bucket should follow the day your business counts,
+not the day UTC counts. An order taken at 23:50 in Madrid belongs to the
+Madrid day:
+
+```python
+from zoneinfo import ZoneInfo
+
+generate_reference(
+    "01J2H8NQPG6B5X8KGN97SX3R5C",
+    generated_at=instant,
+    tz=ZoneInfo("Europe/Madrid"),
+)
+```
+
+> **Upgrading from 0.2.x**
+>
+> Before 0.3.0 the default clock was `datetime.now()` — naive **local**
+> time — so a reference depended on the machine that produced it. The
+> same identifier at the same instant became `20260713…` in Lima and
+> `20260714…` in Tokyo.
+>
+> If your servers do not run in UTC, references generated from now on
+> will land in a different bucket than they used to: roughly **21% of
+> them for a UTC−5 server, 38% for UTC+9**, since that is how often the
+> local date differs from the UTC date.
+>
+> Already-stored references are unaffected — they are strings in a
+> column, and nothing rewrites them. What changes is what *new* calls
+> return. Two things to check:
+>
+> 1. If you **recompute** a reference to look a record up, rather than
+>    storing it, pin the old behaviour by passing the zone your servers
+>    used: `tz=ZoneInfo("America/Lima")`.
+> 2. If you **store** the reference, as this README has always advised,
+>    there is nothing to do.
 
 ## Recovering from a collision
 
@@ -283,21 +343,43 @@ max_references(6, 0.05)   # 320  -> if you accept up to 5% risk
 
 ### Pick a length for your volume
 
+`suffix_length_for(reference_count, max_probability=0.01)` answers the
+question in the direction people actually ask it — you know your volume
+and want a length:
+
 ```python
-from compactref import collision_probability
+from compactref import suffix_length_for
 
-expected_per_day = 200
-
-for length in range(4, 9):
-    risk = collision_probability(expected_per_day, suffix_length=length)
-    print(f"{length} digits -> {risk:.3%}")
-
-# 4 digits -> 86.330%
-# 5 digits -> 18.045%
-# 6 digits -> 1.970%
-# 7 digits -> 0.199%
-# 8 digits -> 0.020%
+suffix_length_for(200)              # 7  -> 200 a day needs 7 digits
+suffix_length_for(200, 0.10)        # 6  -> if you accept up to 10% risk
+suffix_length_for(5_000)            # 10
 ```
+
+The count is **per bucket**, and `date_format` decides the bucket. A
+daily format wants references per *day*; a monthly one wants references
+per *month* — around thirty times as many, needing a **longer** suffix,
+not a shorter one. Getting that backwards is the commonest way to size a
+reference badly.
+
+### Size a retry budget
+
+`expected_rejected_inserts(reference_count, suffix_length)` returns how
+many inserts a unique constraint will reject — which is how many
+references need regenerating with a higher [`attempt`](#recovering-from-a-collision).
+This is the number to plan with:
+
+```python
+from compactref import expected_colliding_pairs, expected_rejected_inserts
+
+expected_rejected_inserts(200, suffix_length=7)   # 0.002 -> effectively never
+expected_rejected_inserts(2_000, suffix_length=3) # 1135  -> a bad format
+
+expected_colliding_pairs(2_000, suffix_length=3)  # 1999  -> pairs, not retries
+```
+
+An insert can only be rejected once, so this can never exceed the
+reference count. Colliding pairs can, and do — which is why they are the
+wrong number to size a retry budget with.
 
 For roughly 200 references per day, a 7-digit suffix keeps the risk
 well under 1%.
