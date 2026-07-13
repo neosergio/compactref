@@ -5,6 +5,33 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-07-13
+
+### Fixed
+
+- `generate_reference()` rejects booleans. `bool` subclasses `int`, so
+  `True` reached the integer branch and returned the reference belonging
+  to `1`, and `False` the one belonging to `0` — silently issuing a
+  reference for a different record. Both now raise `TypeError`.
+
+- `expected_collisions()` documented itself as an error rate: "the number
+  of writes per bucket a caller should expect to retry". It is not. It
+  returns the expected number of *colliding pairs*, and a suffix drawn
+  `k` times is `k * (k - 1) / 2` pairs but only `k - 1` rejected inserts.
+  The two agree while a bucket is sparse and diverge sharply once it
+  fills: two thousand references over three digits is 1999 pairs but
+  about 1135 rejected inserts, so the old wording overstated the retries
+  by more than half. The behaviour is unchanged and correct; the
+  docstring and README now say what it computes, and warn against sizing
+  a retry budget with it.
+
+### Added
+
+- Tests pinning the pair semantics at 0, 1, 2 and crowded volumes, the
+  gap between pairs and rejected inserts, boolean rejection, and the
+  error-type contract: `TypeError` when the type is unusable, `ValueError`
+  when the type is right but the value is not.
+
 ## [0.2.0] - 2026-07-13
 
 ### Added
@@ -58,5 +85,6 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - `collision_probability()` and `max_references()` size the suffix using
   the birthday model.
 
+[0.2.1]: https://github.com/neosergio/compactref/releases/tag/v0.2.1
 [0.2.0]: https://github.com/neosergio/compactref/releases/tag/v0.2.0
 [0.1.0]: https://github.com/neosergio/compactref/releases/tag/v0.1.0
