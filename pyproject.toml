@@ -43,7 +43,9 @@ dependencies = []
 [project.optional-dependencies]
 dev = [
     "build>=1.2",
+    "mypy>=1.11",
     "pytest>=8",
+    "ruff>=0.6",
     "twine>=6",
 ]
 
@@ -68,3 +70,31 @@ addopts = [
     "-ra",
     "-q",
 ]
+
+
+[tool.ruff]
+line-length = 79
+src = ["src", "tests"]
+
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle
+    "F",    # pyflakes
+    "I",    # isort
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "SIM",  # flake8-simplify
+    "RUF",  # ruff-specific
+]
+
+
+[tool.ruff.lint.isort]
+# The codebase separates the import block with two blank lines.
+lines-after-imports = 2
+
+
+[tool.mypy]
+python_version = "3.10"
+files = ["src", "tests"]
+strict = true
