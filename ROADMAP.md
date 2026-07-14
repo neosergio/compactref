@@ -18,60 +18,26 @@ See the [changelog](CHANGELOG.md) for what has shipped.
   `verify_reference()`, `namespace` (`prefix` never reached the hash, so
   an order and an invoice from one customer drew the same suffix). `base`
   on every sizing helper.
-
-## 0.5.0 — ergonomics and confidence
-
-Everything here is additive. Nothing changes what a reference looks like,
-which is the point: the format is now settled.
-
-### A `CompactRef` class
-
-Every call repeats the same five arguments:
-
-```python
-generate_reference(order.id, prefix="ORD", separator="-",
-                   alphabet=CROCKFORD_BASE32, namespace="orders", check=True)
-```
-
-A configured instance says it once:
-
-```python
-orders = CompactRef(prefix="ORD", separator="-",
-                    alphabet=CROCKFORD_BASE32, namespace="orders", check=True)
-
-orders.generate(order.id)
-orders.verify(reference)
-orders.suffix_length_for(200)   # knows its own base
-```
-
-The functions stay. The class is a convenience over them, not a
-replacement, and it is what makes `verify()` pleasant — today a caller has
-to pass the alphabet, separator and prefix back in by hand, and getting
-any of them wrong silently returns False.
-
-### Property-based tests
-
-Hypothesis, over the invariants the hand-written tests only sample:
-
-- every reference decodes to `suffix_length` characters of the alphabet;
-- `verify()` accepts what `generate(check=True)` produced, for any source,
-  alphabet, prefix and separator;
-- a single-character edit never verifies;
-- `attempt` never repeats a reference within a bucket.
-
-### Integration documentation
-
-The retry loop in the README is pseudocode. Real, runnable examples for
-SQLAlchemy and Django — a unique constraint, an `IntegrityError`, and the
-`attempt` retry — are what a caller actually copies.
+- **0.5.0** — `CompactRef`, so generate and verify cannot disagree.
+  `expected_rejected_inserts()` no longer returns a negative count for a
+  roomy bucket. Property-based tests, and a retry loop that runs against a
+  real database rather than sitting in the README as pseudocode.
 
 ## 1.0.0 — the lock
 
-Ship it when the API is one we are content never to break. At that point:
+The API is one we are content never to break. What remains is to say so.
 
 - Remove `expected_collisions()`, deprecated since 0.3.0.
-- Settle the exception contract in writing: `TypeError` when the type is
-  unusable, `ValueError` when the type is right but the value is not.
+- Write the exception contract down: `TypeError` when the type is
+  unusable, `ValueError` when the type is right but the value is not. It
+  is already true, and pinned by test; 1.0.0 is where it becomes a
+  promise.
+- Decide whether `verify_reference()` and the loose-argument
+  `generate_reference()` stay public. They are the primitives `CompactRef`
+  is built from, and removing them would be gratuitous — but the two
+  footguns 0.5.0 documents live in `verify_reference()`, and cannot be
+  fixed there. A deprecation is defensible. Keeping it, with the warning
+  the docstring now carries, is also defensible.
 
 ## Considered, not planned
 

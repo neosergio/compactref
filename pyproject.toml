@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "compactref"
-version = "0.4.0"
+version = "0.5.0"
 description = "Generate compact human-facing references from ULIDs, UUIDs, and other stable identifiers"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -43,9 +43,11 @@ dependencies = []
 [project.optional-dependencies]
 dev = [
     "build>=1.2",
+    "hypothesis>=6",
     "mypy>=1.11",
     "pytest>=8",
     "ruff>=0.6",
+    "sqlalchemy>=2",
     "twine>=6",
 ]
 

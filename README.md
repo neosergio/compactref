@@ -30,6 +30,58 @@ documents or searches.
 pip install compactref
 ```
 
+## A reference scheme
+
+Define the scheme once and use it everywhere. This is the recommended way
+in — the functions below it are the primitives it is built from:
+
+```python
+from compactref import CROCKFORD_BASE32, CompactRef
+
+orders = CompactRef(
+    prefix="ORD",
+    separator="-",
+    alphabet=CROCKFORD_BASE32,
+    namespace="orders",
+    check=True,
+)
+
+reference = orders.generate("01J2H8NQPG6B5X8KGN97SX3R5C")
+# 'ORD-20260713-RWSRDMA'
+
+orders.verify(reference)          # True
+orders.verify("ORD-20260713-RWSRD0A")   # False — a typo
+```
+
+Sizing is bound to the scheme too, and already knows its own alphabet:
+
+```python
+orders.base                          # 32
+orders.suffix_length_for(200)        # 5   -- base32 needs fewer characters
+orders.max_references()              # 4646
+orders.expected_rejected_inserts(500)  # 0.0001
+```
+
+The configuration is checked when the object is built, so a bad alphabet
+raises on the line that made it rather than on the ten-thousandth call.
+It is frozen, so build it once at import and share it.
+
+> **Why a scheme, and not just arguments.** `generate_reference()` and
+> `verify_reference()` take their configuration separately, and neither can
+> see what the other was told. Two things go wrong, and both are quiet:
+>
+> - Verify with a different alphabet, prefix or separator than the
+>   reference was made with, and it returns `False` — which means *"this
+>   reference is a typo"*. You end up telling a customer their perfectly
+>   good reference is invalid, when it was your own config that was wrong.
+> - Verify a reference that has **no check character** — the default — and
+>   it reads the last character of the suffix as one, passing about **one
+>   time in `len(alphabet)`**. It is noise, and it never says so.
+>
+> A `CompactRef` closes both. `generate()` and `verify()` read the same
+> object, so they cannot disagree, and `verify()` on a scheme without
+> `check=True` raises instead of guessing.
+
 ## Generate a reference from a ULID
 
 ```python
@@ -219,26 +271,78 @@ returns the identical string, however many times you ask.
 derives a *different* reference from the same source, so when attempt 0
 is already taken you can offer attempt 1:
 
-```python
-from compactref import generate_reference
+### With SQLAlchemy
 
-def assign_reference(session, product):
-    for attempt in range(10):
-        reference = generate_reference(
-            product.id,
-            prefix="RDR",
-            separator="-",
+This is not pseudocode. It is lifted from `tests/test_integration.py`,
+which runs it against a real table with a real unique constraint:
+
+```python
+from sqlalchemy import String
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
+
+from compactref import CROCKFORD_BASE32, CompactRef
+
+ORDERS = CompactRef(
+    prefix="ORD", separator="-", alphabet=CROCKFORD_BASE32,
+    namespace="orders", check=True,
+)
+MAX_ATTEMPTS = 10
+
+
+class Order(DeclarativeBase):
+    __tablename__ = "orders"
+
+    # The real identifier. The reference never replaces it.
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+
+    # The human-facing one. Unique, so a collision is a rejected write
+    # rather than two orders quietly sharing a reference.
+    reference: Mapped[str] = mapped_column(String, unique=True)
+
+    # Which attempt won. Stored so the reference can be recomputed later.
+    attempt: Mapped[int] = mapped_column(default=0)
+
+
+class ReferenceExhausted(RuntimeError):
+    """Every attempt collided. The suffix is too short for the volume."""
+
+
+def create_order(session: Session, order_id: str) -> Order:
+    for attempt in range(MAX_ATTEMPTS):
+        order = Order(
+            id=order_id,
+            reference=ORDERS.generate(order_id, attempt=attempt),
             attempt=attempt,
         )
-        if not session.query(exists_reference(reference)).scalar():
-            return reference
+        try:
+            with session.begin_nested():
+                session.add(order)
+            return order
+        except IntegrityError:
+            # The constraint fired. The same attempt would produce the same
+            # string forever, so the next one has to differ.
+            continue
 
-    raise RuntimeError("ten attempts collided; the suffix is too short")
+    raise ReferenceExhausted(f"{MAX_ATTEMPTS} attempts collided for {order_id}")
 ```
 
-Each attempt is deterministic in its own right, so a reference remains
-recomputable later from the source and the attempt that won — store the
-attempt alongside the reference if you need to rederive it.
+Three things in there are load-bearing:
+
+**Store the attempt.** Each attempt is deterministic in its own right, so
+the reference stays recomputable — but only from the source *and the
+attempt that won*. Without that column, a retried reference can never be
+derived again.
+
+**Keep the original identifier.** The reference is for humans; the ULID is
+for the database. `id` remains the primary key.
+
+**Give up rather than spin.** Attempts are independent draws, not a walk
+through unused values — two attempts can land on the same suffix, exactly
+as two sources can. So a retry loop is *not* guaranteed to find a free
+reference in a fixed number of tries. Hitting the ceiling does not mean
+try harder; it means the suffix is too short, and
+`expected_rejected_inserts()` would have told you so beforehand.
 
 ```python
 first = generate_reference("01J2H8NQPG6B5X8KGN97SX3R5C")
