@@ -35,12 +35,28 @@ jobs:
       - run: mypy
 
   test:
-    name: Test (Python ${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    name: Test (${{ matrix.os }}, Python ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        # The library promises the same reference on every machine, and the
+        # golden tests are what hold it to that. Running them only on Linux
+        # would leave the promise untested on two of the three platforms
+        # people actually use — strftime and the default text encoding are
+        # exactly where a platform difference would show.
+        os: [ubuntu-latest, macos-latest, windows-latest]
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        exclude:
+          # The full grid is fifteen jobs for a library with no runtime
+          # dependencies. Every Python on Linux, and the ends of the range
+          # elsewhere: a platform difference would not hide in 3.12.
+          - {os: macos-latest, python-version: "3.11"}
+          - {os: macos-latest, python-version: "3.12"}
+          - {os: macos-latest, python-version: "3.13"}
+          - {os: windows-latest, python-version: "3.11"}
+          - {os: windows-latest, python-version: "3.12"}
+          - {os: windows-latest, python-version: "3.13"}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -51,6 +67,11 @@ jobs:
           cache: pip
       - run: pip install -e ".[dev]"
       - run: pytest
+      # Not a dependency check -- it verifies that what IS installed has its
+      # requirements satisfied, which the dev extra guarantees anyway. It is
+      # here to catch a broken environment, not a declared dependency; the
+      # package job proves the wheel declares none.
+      - run: pip check
 
   package:
     name: Build and install the wheel
@@ -67,6 +88,41 @@ jobs:
       - run: pip install -e ".[dev]"
       - run: python -m build
       - run: twine check --strict dist/*
+
+      # The README promises no runtime dependencies. `pip check` does not
+      # prove that -- it only verifies that whatever is installed has its
+      # own requirements met, and would pass just as happily if this package
+      # declared six. Read the built metadata instead: a Requires-Dist line
+      # without an `extra ==` marker is a runtime dependency.
+      - name: The wheel must declare no runtime dependencies
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import glob
+          import zipfile
+          from email.parser import BytesParser
+
+          wheel = glob.glob("dist/*.whl")[0]
+          with zipfile.ZipFile(wheel) as archive:
+              name = next(
+                  n for n in archive.namelist() if n.endswith("METADATA")
+              )
+              metadata = BytesParser().parsebytes(archive.read(name))
+
+          runtime = [
+              requirement
+              for requirement in metadata.get_all("Requires-Dist") or []
+              if "extra ==" not in requirement
+          ]
+
+          if runtime:
+              raise SystemExit(
+                  f"::error::{wheel} declares runtime dependencies, and the "
+                  f"README promises none: {runtime}"
+              )
+
+          print(f"{wheel} declares no runtime dependencies.")
+          PY
 
       # twine validates metadata, not contents: a wheel missing py.typed passes
       # it without a word. So install what was actually built, somewhere with no

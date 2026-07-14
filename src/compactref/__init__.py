@@ -10,14 +10,12 @@ from .core import (
     SourceIdentifier,
     collision_probability,
     expected_colliding_pairs,
-    expected_collisions,
     expected_rejected_inserts,
     generate_reference,
     max_references,
     suffix_length_for,
-    verify_reference,
 )
-from .reference import CompactRef
+from .reference import CompactRef, InvalidReferenceError, ParsedReference
 
 
 __all__ = [
@@ -30,15 +28,15 @@ __all__ = [
     "MAX_ATTEMPT",
     "MAX_NAMESPACE_BYTES",
     "CompactRef",
+    "InvalidReferenceError",
+    "ParsedReference",
     "SourceIdentifier",
     "collision_probability",
     "expected_colliding_pairs",
-    "expected_collisions",
     "expected_rejected_inserts",
     "generate_reference",
     "max_references",
     "suffix_length_for",
-    "verify_reference",
 ]
 
-__version__ = "0.5.0"
+__version__ = "1.0.0"

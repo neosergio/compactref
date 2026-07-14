@@ -62,25 +62,56 @@ orders.max_references()              # 4646
 orders.expected_rejected_inserts(500)  # 0.0001
 ```
 
-The configuration is checked when the object is built, so a bad alphabet
-raises on the line that made it rather than on the ten-thousandth call.
-It is frozen, so build it once at import and share it.
+And it knows how long its own references are, so the column that stores
+them does not have to guess:
 
-> **Why a scheme, and not just arguments.** `generate_reference()` and
-> `verify_reference()` take their configuration separately, and neither can
-> see what the other was told. Two things go wrong, and both are quiet:
+```python
+orders.reference_length   # 20
+orders.date_length        # 8
+
+reference: Mapped[str] = mapped_column(
+    String(orders.reference_length),
+    unique=True,
+)
+```
+
+Both are `int | None`. `None` means the `date_format` renders to different
+widths on different dates — `%B` is `January` in one month and `December`
+in another — so the reference has no fixed length either. That is not a
+compromise: `String(None)` is an unbounded column, which is exactly right
+for a reference of no fixed length. A **checked** scheme is never `None`,
+because it cannot be built on a date that moves.
+
+The configuration is checked when the object is built — types as well as
+values — so a mistake raises on the line that made it rather than on the
+ten-thousandth call. It is frozen, so build it once at import and share it.
+
+Types are checked at runtime, not merely annotated, because the annotation
+is not enough. `bool` subclasses `int`, so `CompactRef(suffix_length=True)`
+would otherwise build a scheme that hands back a **one-character**
+reference — and no type checker would object, since `bool` subclasses `int`
+in the annotations exactly as it does at runtime. Python has no way to
+spell "int but not bool".
+
+> **Why a scheme, and not just arguments.** Verifying a reference means
+> recomputing its check character, which means knowing the alphabet,
+> prefix, separator, suffix length and date format it was generated with.
+> A free function has to be *told* all of that, and cannot tell when it has
+> been told wrong. compactref shipped one briefly, and it failed two ways
+> that no care inside it could have fixed:
 >
-> - Verify with a different alphabet, prefix or separator than the
->   reference was made with, and it returns `False` — which means *"this
->   reference is a typo"*. You end up telling a customer their perfectly
->   good reference is invalid, when it was your own config that was wrong.
-> - Verify a reference that has **no check character** — the default — and
->   it reads the last character of the suffix as one, passing about **one
->   time in `len(alphabet)`**. It is noise, and it never says so.
+> - Told a different alphabet, prefix or separator than the reference was
+>   made with, it returned `False` — which means *"this reference is a
+>   typo"*. You would tell a customer their perfectly good reference was
+>   invalid, when it was your own configuration that was wrong.
+> - Told a reference with **no check character** — the default — it read
+>   the last character of the suffix as one, and passed about **one time in
+>   `len(alphabet)`**. Noise, and it never said so.
 >
-> A `CompactRef` closes both. `generate()` and `verify()` read the same
-> object, so they cannot disagree, and `verify()` on a scheme without
-> `check=True` raises instead of guessing.
+> A `CompactRef` closes both by construction. `generate()` and `verify()`
+> read the same object, so they cannot disagree, and `verify()` on a scheme
+> without `check=True` raises instead of guessing. The free function was
+> removed in 1.0.0.
 
 ## Generate a reference from a ULID
 
@@ -97,7 +128,7 @@ print(reference)
 Possible output:
 
 ```text
-20260710482731
+20260710385177
 ```
 
 ## Add a prefix and separators
@@ -117,7 +148,7 @@ print(reference)
 Possible output:
 
 ```text
-INC-20260710-482731
+INC-20260710-385177
 ```
 
 ## Use a UUID
@@ -143,7 +174,7 @@ reference = generate_reference(
 Possible output:
 
 ```text
-2026071048273164
+2026071024385177
 ```
 
 ## Change the date format
@@ -155,7 +186,7 @@ finer-grained format also produces smaller collision buckets (see
 ```python
 reference = generate_reference(
     "01J2H8NQPG6B5X8KGN97SX3R5C",
-    date_format="%Y%m%d-%H",
+    date_format="%Y%m%d%H",
     separator="-",
     prefix="INC",
 )
@@ -164,8 +195,48 @@ reference = generate_reference(
 Possible output:
 
 ```text
-INC-20260710-14-482731
+INC-2026071014-385177
 ```
+
+### What the date format must not do
+
+Some rules hold always, because they protect **determinism** — the promise
+that a reference depends on its inputs and not on the machine. Others bind
+only when `check=True`, because they protect **verification**. Both are
+enforced on `CompactRef` *and* on `generate_reference()`, so the library
+cannot mint a reference it is unable to read back.
+
+**The date must render to the same width every time.** `%B` is `January`
+in one month and `December` in another; `%-d` is one character or two.
+Verifying reads a reference by position, so a width that moves would make
+references verify for part of the year and be rejected for the rest. Pad
+the field (`%d`, not `%-d`) or use a fixed one (`%m`, not `%B`).
+
+**The date must not depend on the machine's language.** `%B` is `July`
+under `LC_TIME=C`, `julio` in Spanish and `juillet` in French — so the same
+identifier, at the same instant, in the same scheme, would produce a
+different reference on a different machine. That is not a reference, it is a
+caption. `%a`, `%A`, `%b`, `%B`, `%c`, `%p`, `%x` and `%X` are all refused,
+**with or without a check character**: this one is not about verification,
+it is about determinism, which is the thing the library exists to provide.
+
+**The date must render on every platform.** Not every `strftime` directive
+exists everywhere: `%-d` (an unpadded day) is a glibc extension that renders
+on Linux and macOS and *raises* on Windows, and `%#d` is the Windows
+spelling that glibc does not know. A reference is meant to be the same on
+every machine, so a format that only works on some of them cannot keep that
+promise. CompactRef refuses one, naming the directive rather than leaking a
+stdlib traceback. Use the padded numeric directives — `%Y`, `%m`, `%d`,
+`%H` — which render everywhere and render the same.
+
+**The date must be spelled in the alphabet.** The check character is
+computed over the date, and Luhn steps over any character it cannot index —
+so those characters would carry *no protection at all*, and a mistyped one
+would verify. That rules out a literal in the format (`%Y-%m-%d` or
+`%Y%m%d-%H`, whose hyphens are not digits) and an alphabet that cannot
+express the date. Write the hour as `%Y%m%d%H` and it is covered like
+everything else; put your separators in `separator`, where the verifier
+checks them by position.
 
 ## Use an integer or bytes identifier
 
@@ -216,7 +287,7 @@ instant = datetime(2026, 7, 13, 23, 30, tzinfo=timezone.utc)
 
 # The same instant, from a server anywhere in the world.
 generate_reference("01J2H8NQPG6B5X8KGN97SX3R5C", generated_at=instant)
-# 'RDR-20260713-385177'  in Lima, in Tokyo, in Auckland
+# '20260713385177'  in Lima, in Tokyo, in Auckland
 ```
 
 An aware `generated_at` is converted into `tz` first, so two servers
@@ -238,6 +309,22 @@ generate_reference(
     tz=ZoneInfo("Europe/Madrid"),
 )
 ```
+
+> **On Windows, a named zone needs `tzdata`.**
+>
+> `ZoneInfo` reads the operating system's timezone database, and Windows
+> does not have one, so `ZoneInfo("Europe/Madrid")` raises
+> `ZoneInfoNotFoundError` there until you install it:
+>
+> ```bash
+> pip install tzdata          # or: pip install compactref[tz]
+> ```
+>
+> CompactRef itself needs nothing. Its default bucket is
+> `datetime.timezone.utc`, which is built into Python — which is why the
+> library has no runtime dependencies at all. This only applies if *you*
+> ask for a named zone. Linux and macOS ship the database, so it is a
+> Windows matter only.
 
 > **Upgrading from 0.2.x**
 >
@@ -297,8 +384,12 @@ class Order(DeclarativeBase):
     id: Mapped[str] = mapped_column(String, primary_key=True)
 
     # The human-facing one. Unique, so a collision is a rejected write
-    # rather than two orders quietly sharing a reference.
-    reference: Mapped[str] = mapped_column(String, unique=True)
+    # rather than two orders quietly sharing a reference. The scheme knows
+    # how long it is, so the column does not have to guess.
+    reference: Mapped[str] = mapped_column(
+        String(ORDERS.reference_length),   # VARCHAR(20)
+        unique=True,
+    )
 
     # Which attempt won. Stored so the reference can be recomputed later.
     attempt: Mapped[int] = mapped_column(default=0)
@@ -360,8 +451,9 @@ produced before the argument existed. References already stored by
 callers on 0.1.0 remain valid.
 
 Reaching for `attempt` on most writes is a sign the suffix is too short,
-not that the retry loop is working. Size it with `expected_collisions()`
-below.
+not that the retry loop is working. Pick the length with
+[`suffix_length_for()`](#pick-a-length-for-your-volume), and size the retry
+budget with [`expected_rejected_inserts()`](#size-a-retry-budget).
 
 ## More room per character
 
@@ -418,19 +510,25 @@ exist. `check=True` makes a mistyped reference *invalid* rather than
 merely absent, which is a different answer and an actionable one:
 
 ```python
-from compactref import generate_reference, verify_reference
+from compactref import CompactRef
 
-reference = generate_reference(
-    "01J2H8NQPG6B5X8KGN97SX3R5C",
-    prefix="RDR",
-    separator="-",
-    check=True,
-)
-# 'RDR-20260713-3851772'   <- the last character is the check
+scheme = CompactRef(prefix="RDR", separator="-", check=True)
 
-verify_reference(reference, prefix="RDR", separator="-")          # True
-verify_reference("RDR-20260713-3851779", prefix="RDR", separator="-")  # False
+reference = scheme.generate("01J2H8NQPG6B5X8KGN97SX3R5C")
+# 'RDR-20260714-3851770'   <- the last character is the check
+
+scheme.verify(reference)                  # True
+scheme.verify("RDR-20260714-3851779")     # False — a typo
 ```
+
+Verification lives on the scheme, not on a free function, and that is
+deliberate. Checking a reference means knowing the alphabet, prefix,
+separator, suffix length and date format it was *generated* with — and a
+free function has to be told all of that, with no way to tell when it has
+been told wrong. It would return `False` for a valid reference whose
+configuration you mistyped, which reads as *"that reference is a typo"*.
+The scheme holds one configuration, so `generate()` and `verify()` cannot
+disagree.
 
 The check covers the **date as well as the suffix**, so a mistyped day —
 which would send the lookup into the wrong bucket — is caught too.
@@ -449,6 +547,87 @@ What it catches, measured rather than assumed:
 > from the reference, not drawn from the hash. A six-character suffix plus
 > a check is seven characters holding a million values, not ten million.
 > Size with `suffix_length`, which is unchanged.
+
+## Telling a typo from a stranger
+
+`verify()` answers yes or no. A support desk needs three answers, and
+`parse()` is what gives the third:
+
+```python
+from compactref import CompactRef, InvalidReferenceError
+
+orders = CompactRef(prefix="ORD", separator="-", check=True)
+
+parsed = orders.parse("ORD-20260714-0471283")
+parsed.prefix           # 'ORD'
+parsed.date_part        # '20260714'
+parsed.suffix           # '047128'
+parsed.check_character  # '3'
+```
+
+`parse()` is *structural*. It says the string is shaped exactly as this
+scheme shapes one — the right prefix, the separators where they belong,
+each field at its width, nothing trailing, every character in the alphabet
+— and hands back the pieces. It does not decide whether the check
+character is right. `verify()` does that, on top of it.
+
+That split is the point:
+
+| | `parse()` | `verify()` | what you can say |
+| --- | --- | --- | --- |
+| `ORD-20260714-0471283` | ✓ | `True` | valid |
+| `ORD-20260714-0471203` | ✓ | `False` | *"that is one of our order numbers, and you have a digit wrong"* |
+| `hello` | `InvalidReferenceError` | `False` | *"that is not an order number"* |
+
+A caller who can only say `False` cannot choose between the last two — and
+they are different sentences to say to a customer.
+
+`InvalidReferenceError` subclasses `ValueError`, so `except ValueError`
+still catches it if you do not care about the distinction. And `parse()`
+works without a check character too — the structure is checkable without
+one; `check_character` is then `None`.
+
+## What the check character protects
+
+Locked in 1.0.0. Changing any of this would invalidate references already
+in somebody's database, so it does not change without a 2.0.
+
+**The checksum covers the date and the suffix.** Luhn mod N over the
+alphabet, computed on `date_part + suffix`.
+
+**It does not cover the prefix.** Deliberately: the prefix is a *label*.
+`namespace` is what separates one kind of reference from another, and it
+does so in the hash, where it cannot be spelled away. A label may be
+renamed, translated, or shown differently in one place than another, and
+none of that should change the reference underneath. What separates an
+order from an invoice is the namespace, not the three letters in front.
+
+**It does not cover the separators.** They carry no information.
+
+**But the prefix and the separators are still checked** — structurally,
+not arithmetically. `verify()` reads a reference by position: it matches
+the prefix literally, requires each separator exactly where it belongs,
+takes each field at its known width, and permits nothing to trail. So a
+wrong prefix, a doubled separator, a missing one, or a stray character at
+the end is refused, even though none of them touches the checksum.
+
+**Every character of the date and the suffix is in the alphabet.** A
+checked scheme cannot be built otherwise, so the checksum never skips
+anything and Luhn's guarantee is total rather than partial.
+
+**Verification is exact, and case-sensitive.** `verify()` accepts what
+`generate()` produced, and nothing else. It does not normalise, trim,
+upper-case, or repair its input.
+
+> **On Crockford and case.** Crockford's base32 was designed to tolerate
+> transcription — lowercase accepted, `I` and `L` read as `1`, `O` read as
+> `0`. CompactRef does not do that yet: it generates upper case and
+> verifies exactly.
+>
+> That is a deliberate omission rather than an oversight, and it is safe to
+> revisit. Teaching `verify()` to accept more is *additive* — it changes
+> nothing that `generate()` produces and invalidates no stored reference —
+> so it can arrive in a 1.x without breaking the promise above.
 
 ## Separating references that share a source
 
@@ -509,6 +688,23 @@ CompactRef accepts:
 
 ## Choosing a suffix length
 
+Five functions, five different questions. Two of them sound alike and are
+not, which is the confusion worth heading off:
+
+| Question | Function |
+| --- | --- |
+| Will *anything* collide? | `collision_probability()` |
+| How crowded is this format? | `expected_colliding_pairs()` |
+| How many writes will a unique constraint reject — my **retry budget**? | `expected_rejected_inserts()` |
+| How much volume does a given length carry? | `max_references()` |
+| What length do I need for my volume? | `suffix_length_for()` |
+
+To *choose* a length, use `suffix_length_for()`. To *budget* for retries,
+use `expected_rejected_inserts()`. Colliding pairs measure crowding, not
+work: a suffix drawn `k` times is `k(k-1)/2` pairs but only `k-1` rejected
+inserts, so the pair count runs far ahead of the retries once a bucket
+fills.
+
 A reference is unique only within a single *bucket* — references that
 share the same prefix and date part. Because the date resets each day,
 what matters is how many references you expect **per bucket** (for the
@@ -537,18 +733,18 @@ collision_probability(120, suffix_length=4)  # 0.5103  -> coin flip
 reports "almost certainly", which stops separating a format that
 collides twice a month from one that collides fifty times.
 
-`expected_collisions(reference_count, suffix_length)` returns how many
+`expected_colliding_pairs(reference_count, suffix_length)` returns how many
 **colliding pairs** are expected in one bucket — two references sharing a
 suffix is one pair:
 
 ```python
-from compactref import collision_probability, expected_collisions
+from compactref import collision_probability, expected_colliding_pairs
 
-collision_probability(2_000, suffix_length=3)   # 1.0   -> "certain"
-collision_probability(20_000, suffix_length=3)  # 1.0   -> "certain", equally
+collision_probability(2_000, suffix_length=3)      # 1.0  -> "certain"
+collision_probability(20_000, suffix_length=3)     # 1.0  -> "certain", equally
 
-expected_collisions(2_000, suffix_length=3)     # 1999   pairs
-expected_collisions(20_000, suffix_length=3)    # 199990 pairs
+expected_colliding_pairs(2_000, suffix_length=3)   # 1999   pairs
+expected_colliding_pairs(20_000, suffix_length=3)  # 199990 pairs
 ```
 
 Both formats are certain to collide. Only the second number says how
@@ -641,21 +837,117 @@ Applications requiring unique references should:
 3. Handle that rejection by retrying with a higher `attempt`, as in
    [Recovering from a collision](#recovering-from-a-collision).
 4. Size `suffix_length` for the expected volume *per bucket*, using
-   `expected_collisions()`, so step 3 stays a rare path rather than the
-   normal one.
+   `suffix_length_for()`, so step 3 stays a rare path rather than the
+   normal one — and check the cost of that path with
+   `expected_rejected_inserts()`.
 
 ## Requirements
 
 Python 3.10 or newer. No runtime dependencies.
 
+## Exceptions
+
+Three, and no more. Locked in 1.0.0.
+
+| Raised | When | Where you meet it |
+| --- | --- | --- |
+| `TypeError` | The type is unusable — `suffix_length=True`, `prefix=123`, `tz="UTC"` | Building a scheme, or calling `generate_reference()` |
+| `ValueError` | The type is right but the value is not — an alphabet that repeats a character, a separator the suffix can contain, a date the check cannot cover | Building a scheme |
+| `InvalidReferenceError` | A string is not shaped like a reference from this scheme | `parse()` |
+
+`InvalidReferenceError` subclasses `ValueError`, so `except ValueError`
+catches everything the library raises with a bad value, and code that does
+not care about the distinction need not learn it.
+
+There is no `CompactRefError` base class, deliberately. The only exception
+anyone catches is `InvalidReferenceError` — it is the one a *user* can
+trigger, by mistyping a reference. The rest are programmer errors: a bad
+alphabet, a boolean where an integer belongs. You do not catch those, you
+fix them, once, at startup. And the config-versus-reference distinction is
+already available from *where* you catch:
+
+```python
+try:
+    orders = CompactRef(**settings.COMPACTREF)   # config errors surface here
+except (TypeError, ValueError) as error:
+    raise ImproperlyConfigured(error)
+
+try:
+    parsed = orders.parse(user_input)            # reference errors, here
+except InvalidReferenceError:
+    return "That is not one of our reference numbers."
+```
+
+`verify()` does **not** raise on a malformed reference. It returns `False`,
+because it answers a yes/no question. It raises only if the scheme has no
+check character, which is a configuration mistake rather than a bad
+reference.
+
+## Stability
+
+CompactRef is 1.0. The API does not break without a 2.0.
+
+Locked:
+
+- **Names** — `CompactRef`, `generate_reference()`, the sizing helpers.
+- **Parameters** — their names, their order, their defaults.
+- **The default format** — `generate_reference("…")` returns exactly what
+  it returned in 0.1.0. Every argument added since (`attempt`, `namespace`,
+  `alphabet`, `check`, `tz`) defaults to doing nothing, and a test pins the
+  strings 0.1.0 produced. References you have already stored keep
+  resolving.
+- **Exceptions** — `TypeError` when the type is unusable, `ValueError` when
+  the type is right but the value is not.
+- **Determinism** — the same source, date, attempt and configuration give
+  the same reference on every machine. Nothing reads the environment.
+
+Not locked, because it never could be: **a reference is not a unique
+identifier**. See [Uniqueness warning](#uniqueness-warning).
+
+Removed in 1.0.0: `verify_reference()`. Use
+`CompactRef(check=True).verify()`, which cannot be handed a configuration
+that disagrees with the one that made the reference. It existed for a day,
+in 0.4.0 and 0.5.0; 1.0 is the last version that may remove it, and keeping
+a function documented as unsafe for the whole of 1.x would have been a
+worse promise than breaking it now.
+
+## Upgrading to 1.0
+
+**One thing breaks.** `verify_reference()` is removed. Use
+`CompactRef(check=True).verify()`:
+
+```python
+# before (0.4.0, 0.5.0)
+verify_reference(reference, alphabet=A, prefix=P, separator=S)
+
+# after
+scheme = CompactRef(alphabet=A, prefix=P, separator=S, check=True)
+scheme.verify(reference)
+```
+
+It could not be made safe. It had to be told the alphabet, prefix and
+separator a reference was generated with, and could not tell when it had
+been told wrong — it returned `False`, which reads as *"that reference is a
+typo"*, so you would tell a customer their perfectly good reference was
+invalid. Nor could it tell that a reference carried no check character at
+all, and "verified" one about once in `len(alphabet)`. A `CompactRef` holds
+one configuration, so `generate()` and `verify()` cannot disagree.
+
+`expected_collisions()` is also gone, deprecated since 0.3.0. Use
+`expected_colliding_pairs()` to size a format, or
+`expected_rejected_inserts()` to size a retry budget.
+
+**Nothing else moves.** Every reference this library has ever produced still
+resolves — `generate_reference("…")` returns exactly what it returned in
+0.1.0, and a test pins the strings to prove it. Every argument added across
+six releases (`attempt`, `namespace`, `alphabet`, `check`, `tz`) defaults to
+doing nothing.
+
 ## Changelog
 
-See
+The full history — including the timezone fix in 0.3.0, which *did* move
+references for servers not running in UTC — is in
 [CHANGELOG.md](https://github.com/neosergio/compactref/blob/main/CHANGELOG.md).
-
-Version 0.2.0 added the `attempt` argument and `expected_collisions()`.
-References produced by 0.1.0 are unchanged: `attempt` defaults to 0, which
-reproduces them byte for byte, so anything already stored stays valid.
 
 ## Contributing
 

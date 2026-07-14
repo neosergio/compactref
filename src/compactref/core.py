@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import re
+import sys
 from datetime import datetime, timezone, tzinfo
 from hashlib import blake2b
 from math import ceil, exp, expm1, log, log1p, sqrt
 from typing import TypeAlias
 from uuid import UUID
-from warnings import warn
 
 
 SourceIdentifier: TypeAlias = str | bytes | int | UUID
@@ -35,6 +36,154 @@ MAX_ATTEMPT = 2**128 - 1
 
 # blake2b takes at most 64 bytes of key, which is where the namespace goes.
 MAX_NAMESPACE_BYTES = 64
+
+# Enough datetimes to expose a date_format whose width moves: every kind of
+# field that can render short. Two dates are not enough -- 1 January and 31
+# December are both midnight, so an unpadded hour (%-H) renders "0" in each
+# and looks fixed when it is not.
+_PROBE_DATES = tuple(
+    datetime(2026, month, day, hour, minute)
+    for month in (1, 9, 12)
+    for day in (1, 9, 28)
+    for hour in (0, 9, 23)
+    for minute in (0, 59)
+)
+
+
+# strftime directives whose output depends on the machine's locale. %B is
+# "July" under LC_TIME=C, "julio" in Spanish and "juillet" in French — the
+# same source, the same instant, the same configuration, three different
+# references. That is the 0.3.0 bug wearing a different hat: a reference is
+# supposed to depend on its inputs, not on the machine that ran the code.
+_LOCALE_DEPENDENT = {
+    "a",  # weekday, abbreviated
+    "A",  # weekday
+    "b",  # month, abbreviated
+    "B",  # month
+    "h",  # month, abbreviated (a synonym for %b)
+    "c",  # the locale's whole date-and-time rendering
+    "p",  # AM/PM
+    "r",  # the locale's 12-hour clock
+    "x",  # the locale's date
+    "X",  # the locale's time
+    "Z",  # the timezone's *name*, which is locale- and platform-dependent
+}
+
+
+def _reject_a_locale_dependent_date(date_format: str) -> None:
+    """
+    A reference must not depend on the machine's language.
+
+    Enforced always, not only for checked schemes: this is not about
+    verification, it is about determinism, which is the thing the library
+    exists to provide. A caller who wants the month spelled out wants a
+    reference that reads differently in Madrid than in London, and that is
+    not a reference — it is a caption.
+    """
+    # %% is an escaped percent, not a directive.
+    directives = re.findall(r"%[-_0^#]*(\w)", date_format.replace("%%", ""))
+
+    offending = sorted({d for d in directives if d in _LOCALE_DEPENDENT})
+    if offending:
+        spelled = ", ".join(f"'%{d}'" for d in offending)
+        raise ValueError(
+            f"date_format {date_format!r} depends on the machine's locale "
+            f"({spelled}). '%B' renders 'July' under LC_TIME=C, 'julio' in "
+            f"Spanish and 'juillet' in French, so the same identifier would "
+            f"produce a different reference on a different machine — and a "
+            f"reference is meant to depend on its inputs, not on where it "
+            f"was made. Use the numeric directives ('%Y', '%m', '%d', '%H'), "
+            f"which render the same everywhere."
+        )
+
+
+def _render_date(moment: datetime, date_format: str) -> str:
+    """
+    strftime, with the platform's complaint translated into ours.
+
+    Not every directive exists everywhere. ``%-d`` (an unpadded day) is a
+    glibc extension: it renders on Linux and macOS and raises
+    ``ValueError("Invalid format string")`` on Windows, from inside the
+    standard library, with nothing in the message about what the caller
+    chose. Windows spells the same thing ``%#d``, and that one is unknown to
+    glibc — so neither is portable.
+
+    A reference is supposed to be the same on every machine. A date_format
+    that only renders on some of them cannot keep that promise, and the
+    caller deserves to be told which directive did it rather than left to
+    read a stdlib traceback.
+    """
+    try:
+        return moment.strftime(date_format)
+    except ValueError as error:
+        raise ValueError(
+            f"date_format {date_format!r} does not render on this platform "
+            f"({sys.platform}): {error}. Some directives are not portable — "
+            f"'%-d' is a glibc extension that Windows rejects, and '%#d' is "
+            f"the Windows spelling that glibc does not know. A reference is "
+            f"meant to be the same on every machine, so use the padded "
+            f"numeric directives ('%Y', '%m', '%d', '%H'), which render "
+            f"everywhere and render the same."
+        ) from error
+
+
+def _validate_checkable(
+    *,
+    alphabet: str,
+    date_format: str,
+    separator: str,
+) -> None:
+    """
+    The rules a reference must obey to be worth checking.
+
+    A check character is a promise: this string was not garbled. These are
+    the configurations that would break the promise quietly, so asking for
+    ``check=True`` means asking for a format that can keep it.
+
+    Enforced here, in the function, and not only in CompactRef -- otherwise
+    generate_reference() could mint a checked reference that no CompactRef
+    could be built to verify, which is a strange thing for a library to be
+    able to do.
+    """
+    widths = {
+        len(_render_date(moment, date_format)) for moment in _PROBE_DATES
+    }
+    if len(widths) > 1:
+        raise ValueError(
+            f"a checked reference needs a date of a fixed width, but "
+            f"{date_format!r} renders to widths {sorted(widths)}. Verifying "
+            f"reads a reference by position, so a width that moves would "
+            f"make references verify for part of the year and be rejected "
+            f"for the rest. Pad the field ('%d', not '%-d') or use a fixed "
+            f"one ('%m', not '%B')."
+        )
+
+    rendered = {
+        character
+        for moment in _PROBE_DATES
+        for character in _render_date(moment, date_format)
+    }
+    unrepresentable = sorted(rendered - set(alphabet))
+    if unrepresentable:
+        raise ValueError(
+            f"a checked reference needs a date its alphabet can spell, but "
+            f"{date_format!r} renders {''.join(unrepresentable)!r}, which "
+            f"the alphabet does not contain. The check character is computed "
+            f"over the date, and Luhn steps over any character it cannot "
+            f"index -- so those characters would carry no protection at all, "
+            f"and a mistyped one would verify. Drop the literal ('%Y%m%d%H', "
+            f"not '%Y%m%d-%H'), or use an alphabet that can spell the date."
+        )
+
+    shared = sorted(set(separator) & set(alphabet)) if separator else []
+    if shared:
+        raise ValueError(
+            f"a checked reference needs a separator its suffix cannot "
+            f"contain, but the separator shares {''.join(shared)!r} with the "
+            f"alphabet. Nothing downstream could take the reference apart: a "
+            f"separator that looks exactly like the data is no use to a "
+            f"person reading it aloud, or to a regex splitting on it."
+        )
 
 
 def generate_reference(
@@ -112,7 +261,7 @@ def generate_reference(
             rather than merely absent. Without one, a support agent who
             fat-fingers a digit gets "no such record", which is
             indistinguishable from a record that does not exist. Read it
-            back with verify_reference().
+            back with CompactRef.verify().
 
             The character is derived from the date and the suffix — Luhn
             mod N over ``alphabet``, the scheme on the back of a credit
@@ -196,6 +345,14 @@ def generate_reference(
             than two characters or repeats one, or the namespace is longer
             than MAX_NAMESPACE_BYTES once encoded.
 
+    Note:
+        Every argument is checked at runtime, not only annotated. bool
+        subclasses int, so ``suffix_length=True`` would otherwise mean a
+        one-character suffix and ``attempt=True`` would mean somebody
+        else's retry — quietly, and past any type checker, which cannot
+        spell "int but not bool". ``check`` must be a bool rather than
+        merely truthy: ``check="no"`` would turn the check character on.
+
     Warning:
         Shortening an identifier reduces its uniqueness space. This
         function does not mathematically guarantee that two different
@@ -203,19 +360,38 @@ def generate_reference(
         See collision_probability() and expected_rejected_inserts(),
         passing ``base=len(alphabet)``.
     """
-    if suffix_length < 1:
-        raise ValueError("suffix_length must be greater than zero")
-    if attempt < 0:
-        raise ValueError("attempt must not be negative")
-    if attempt > MAX_ATTEMPT:
-        raise ValueError(f"attempt must not be greater than {MAX_ATTEMPT}")
+    _validate_configuration(
+        suffix_length=suffix_length,
+        alphabet=alphabet,
+        check=check,
+        namespace=namespace,
+        date_format=date_format,
+        prefix=prefix,
+        separator=separator,
+        tz=tz,
+        attempt=attempt,
+    )
 
-    _validate_alphabet(alphabet)
+    if generated_at is not None and not isinstance(generated_at, datetime):
+        raise TypeError(
+            f"generated_at must be a datetime or None, not "
+            f"{type(generated_at).__name__}"
+        )
+
+    if check:
+        # A check character is a promise. Asking for one means asking for a
+        # format that can keep it — and, not least, one that a CompactRef
+        # can be built to verify.
+        _validate_checkable(
+            alphabet=alphabet,
+            date_format=date_format,
+            separator=separator,
+        )
+
     namespace_key = _normalize_namespace(namespace)
-
     source_bytes = _normalize_source(source)
 
-    date_part = _resolve_moment(generated_at, tz).strftime(date_format)
+    date_part = _render_date(_resolve_moment(generated_at, tz), date_format)
 
     numeric_value = _source_to_integer(source_bytes, attempt, namespace_key)
     suffix = _encode(numeric_value, alphabet, suffix_length)
@@ -228,58 +404,6 @@ def generate_reference(
     parts = [part for part in (prefix, date_part, suffix) if part]
 
     return separator.join(parts)
-
-
-def verify_reference(
-    reference: str,
-    *,
-    alphabet: str = DEFAULT_ALPHABET,
-    separator: str = "",
-    prefix: str = "",
-) -> bool:
-    """
-    Check a reference that was generated with ``check=True``.
-
-    Returns True when the check character agrees with the rest of the
-    reference. A mistyped reference is then *invalid*, rather than merely
-    absent, and a caller can say so — "that is not a valid reference"
-    instead of "no such record", which is a different answer and an
-    actionable one.
-
-    The generating call's ``alphabet``, ``separator`` and ``prefix`` have
-    to be passed back in, because they decide where the reference ends and
-    its label begins.
-
-        >>> reference = generate_reference(
-        ...     "01J2H8NQPG6B5X8KGN97SX3R5C",
-        ...     generated_at=datetime(2026, 7, 13),
-        ...     prefix="RDR",
-        ...     separator="-",
-        ...     check=True,
-        ... )
-        >>> verify_reference(reference, prefix="RDR", separator="-")
-        True
-
-    This says nothing about whether the reference exists. It says the
-    string was not garbled on its way here.
-    """
-    _validate_alphabet(alphabet)
-
-    body = reference
-    if prefix and separator and body.startswith(prefix + separator):
-        body = body[len(prefix) + len(separator) :]
-    elif prefix and not separator and body.startswith(prefix):
-        body = body[len(prefix) :]
-
-    if separator:
-        body = body.replace(separator, "")
-
-    if len(body) < 2:
-        return False
-
-    payload, check = body[:-1], body[-1]
-
-    return _check_character(payload, alphabet) == check
 
 
 def collision_probability(
@@ -401,32 +525,6 @@ def expected_rejected_inserts(
     # precision exactly where that cancellation happens.
     taken = -space * expm1(reference_count * log1p(-1.0 / space))
     return reference_count - taken
-
-
-def expected_collisions(
-    reference_count: int,
-    suffix_length: int,
-    base: int = 10,
-) -> float:
-    """
-    Deprecated alias for expected_colliding_pairs().
-
-    The old name suggested a count of collisions a caller would have to
-    handle, and the documentation said as much. It is not: it counts
-    pairs, which runs far ahead of the rejected inserts once a bucket
-    fills. Use expected_colliding_pairs() to size a format, or
-    expected_rejected_inserts() to size a retry budget.
-    """
-    warn(
-        "expected_collisions() is deprecated and will be removed in 1.0.0. "
-        "It returns colliding pairs, not rejected inserts: use "
-        "expected_colliding_pairs() to measure how crowded a format is, or "
-        "expected_rejected_inserts() for the number of retries a unique "
-        "constraint will actually cause.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    return expected_colliding_pairs(reference_count, suffix_length, base)
 
 
 def max_references(
@@ -600,6 +698,91 @@ def _resolve_moment(generated_at: datetime | None, tz: tzinfo) -> datetime:
         return generated_at
 
     return generated_at.astimezone(tz)
+
+
+def _require_int(value: object, name: str) -> None:
+    """
+    An integer, and not a bool wearing one as a coat.
+
+    bool subclasses int, so True is 1 and False is 0 wherever an integer is
+    wanted — quietly. A caller who passes a flag where a suffix_length or an
+    attempt belongs gets a one-character reference, or somebody else's
+    retry, and nothing says a word. It is the same trap 0.2.1 closed for
+    the source; this closes it for the rest.
+
+    A type checker will not catch it, and cannot: bool subclasses int in
+    the annotations exactly as it does at runtime, so mypy is content.
+    Python has no way to spell "int but not bool".
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(
+            f"{name} must be an integer, not {type(value).__name__}"
+        )
+
+
+def _require_str(value: object, name: str) -> None:
+    if not isinstance(value, str):
+        raise TypeError(f"{name} must be a string, not {type(value).__name__}")
+
+
+def _require_bool(value: object, name: str) -> None:
+    """
+    Strictly a bool. Truthiness is not consent.
+
+    ``check="yes"`` is truthy, so it would quietly turn the check character
+    on; ``check="no"`` is truthy too, and would turn it on as well.
+    """
+    if not isinstance(value, bool):
+        raise TypeError(f"{name} must be a bool, not {type(value).__name__}")
+
+
+def _require_tzinfo(value: object, name: str) -> None:
+    if not isinstance(value, tzinfo):
+        raise TypeError(
+            f"{name} must be a datetime.tzinfo, not {type(value).__name__}"
+        )
+
+
+def _validate_configuration(
+    *,
+    suffix_length: int,
+    alphabet: str,
+    check: bool,
+    namespace: str,
+    date_format: str,
+    prefix: str,
+    separator: str,
+    tz: tzinfo,
+    attempt: int,
+) -> None:
+    """
+    Everything that shapes a reference, checked before one is shaped.
+
+    TypeError when the type is unusable, ValueError when the type is right
+    but the value is not. That contract is locked in 1.0.0, so it is worth
+    honouring in one place rather than nine.
+    """
+    _require_int(suffix_length, "suffix_length")
+    _require_int(attempt, "attempt")
+    _require_bool(check, "check")
+    _require_str(alphabet, "alphabet")
+    _require_str(namespace, "namespace")
+    _require_str(date_format, "date_format")
+    _require_str(prefix, "prefix")
+    _require_str(separator, "separator")
+    _require_tzinfo(tz, "tz")
+
+    if suffix_length < 1:
+        raise ValueError("suffix_length must be greater than zero")
+    if attempt < 0:
+        raise ValueError("attempt must not be negative")
+    if attempt > MAX_ATTEMPT:
+        raise ValueError(f"attempt must not be greater than {MAX_ATTEMPT}")
+
+    _reject_a_locale_dependent_date(date_format)
+
+    _validate_alphabet(alphabet)
+    _normalize_namespace(namespace)
 
 
 def _normalize_source(source: SourceIdentifier) -> bytes:
