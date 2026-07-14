@@ -27,6 +27,17 @@ from sqlalchemy.orm import (
 from compactref import CROCKFORD_BASE32, CompactRef
 
 
+ORDERS = CompactRef(
+    prefix="ORD",
+    separator="-",
+    alphabet=CROCKFORD_BASE32,
+    namespace="orders",
+    check=True,
+)
+
+MAX_ATTEMPTS = 10
+
+
 class Base(DeclarativeBase):
     pass
 
@@ -38,8 +49,12 @@ class Order(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True)
 
     # The human-facing one. Unique, so a collision is a rejected write
-    # rather than two orders quietly sharing a reference.
-    reference: Mapped[str] = mapped_column(String, unique=True)
+    # rather than two orders quietly sharing a reference. The scheme knows
+    # how long it is, so the column does not have to guess.
+    reference: Mapped[str] = mapped_column(
+        String(ORDERS.reference_length),
+        unique=True,
+    )
 
     # Which attempt won. Stored so the reference can be recomputed later
     # from the id alone.
@@ -48,17 +63,6 @@ class Order(Base):
 
 class ReferenceExhausted(RuntimeError):
     """Every attempt collided. The suffix is too short for the volume."""
-
-
-ORDERS = CompactRef(
-    prefix="ORD",
-    separator="-",
-    alphabet=CROCKFORD_BASE32,
-    namespace="orders",
-    check=True,
-)
-
-MAX_ATTEMPTS = 10
 
 
 def create_order(
@@ -195,21 +199,25 @@ def test_the_reference_recomputes_from_the_id_and_the_stored_attempt(
 def test_a_hopeless_format_gives_up_rather_than_spinning(
     session: Session,
 ) -> None:
-    """A one-character binary suffix has two values. Fill both.
+    """A one-character decimal suffix has ten values. Fill all ten.
 
     The loop must raise rather than loop forever. Exhaustion is a sizing
     problem, and no retry policy fixes it.
+
+    Decimal rather than binary, because a checked scheme has to be able to
+    spell its own date: under an alphabet of "01" the checksum would step
+    over the 2 of a 2026 date, and CompactRef refuses to build that.
     """
-    tiny = CompactRef(suffix_length=1, alphabet="01", check=True)
+    tiny = CompactRef(suffix_length=1, check=True)
     at = datetime(2026, 7, 13, tzinfo=timezone.utc)
 
-    # Take both references the scheme is capable of issuing, by asking it
+    # Take every reference the scheme is capable of issuing, by asking it
     # for them rather than hand-building strings.
     every_reference = {
         tiny.generate(f"filler-{index}", generated_at=at)
-        for index in range(50)
+        for index in range(400)
     }
-    assert len(every_reference) == 2, every_reference
+    assert len(every_reference) == 10, every_reference
 
     for index, reference in enumerate(sorted(every_reference)):
         session.add(Order(id=f"squatter-{index}", reference=reference))

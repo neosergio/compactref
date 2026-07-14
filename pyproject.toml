@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "compactref"
-version = "0.5.0"
+version = "1.0.0"
 description = "Generate compact human-facing references from ULIDs, UUIDs, and other stable identifiers"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -25,7 +25,7 @@ keywords = [
 ]
 
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "Programming Language :: Python",
     "Programming Language :: Python :: 3",
@@ -49,6 +49,18 @@ dev = [
     "ruff>=0.6",
     "sqlalchemy>=2",
     "twine>=6",
+    # zoneinfo reads the operating system's timezone database, and Windows
+    # does not have one. The tests use named zones, so on Windows they need
+    # this. The library itself does not: its default timezone is
+    # datetime.timezone.utc, which is built in.
+    "tzdata; sys_platform == 'win32'",
+]
+
+# Named timezones on Windows. Not required to use the library -- the default
+# bucket is UTC, which needs nothing -- but `tz=ZoneInfo("Europe/Madrid")`
+# does, because Windows ships no timezone database for zoneinfo to read.
+tz = [
+    "tzdata; sys_platform == 'win32'",
 ]
 
 

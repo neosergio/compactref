@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import pytest
 from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
@@ -32,6 +33,13 @@ sources = st.one_of(
 
 alphabets = st.sampled_from([DIGITS, CROCKFORD_BASE32, "01", "abcdef"])
 
+# A checked scheme must be able to spell its own date, or the checksum skips
+# the characters it cannot index and a mistyped date verifies. Hypothesis
+# found that: under "01", the 2 of a 2026 date is skipped, and editing it to
+# a 0 left the check unmoved. So a checked scheme draws from the alphabets
+# that contain the digits.
+checkable_alphabets = st.sampled_from([DIGITS, CROCKFORD_BASE32])
+
 namespaces = st.text(max_size=16).filter(
     lambda value: len(value.encode("utf-8")) <= MAX_NAMESPACE_BYTES
 )
@@ -44,10 +52,12 @@ moments = st.datetimes(
 
 @st.composite
 def schemes(draw: st.DrawFn, *, check: bool | None = None) -> CompactRef:
+    checked = draw(st.booleans()) if check is None else check
+
     return CompactRef(
         suffix_length=draw(st.integers(min_value=1, max_value=12)),
-        alphabet=draw(alphabets),
-        check=draw(st.booleans()) if check is None else check,
+        alphabet=draw(checkable_alphabets if checked else alphabets),
+        check=checked,
         namespace=draw(namespaces),
         prefix=draw(st.sampled_from(["", "RDR", "ORD"])),
         separator=draw(st.sampled_from(["", "-", "/"])),
@@ -117,24 +127,55 @@ def test_a_single_character_edit_never_verifies(
     position: int,
     replacement: int,
 ) -> None:
-    """Luhn catches every single-character error, in every alphabet."""
+    """Change any one character of a reference and it stops verifying.
+
+    Anywhere: in the prefix, in a separator, in the date, in the suffix.
+    Each is caught by something different — the prefix by the literal
+    match, a separator by the positional read, the date and suffix by Luhn
+    — and the caller does not care which. They care that a garbled
+    reference is refused.
+    """
     reference = scheme.generate(source, generated_at=at)  # type: ignore[arg-type]
+    assume(reference)
 
-    body = scheme._strip_label(reference)
-    assume(body)
-
-    index = position % len(body)
+    index = position % len(reference)
     character = scheme.alphabet[replacement % scheme.base]
-    assume(character != body[index])
-    # Only edit a character the check actually covers.
-    assume(body[index] in scheme.alphabet)
+    assume(character != reference[index])
 
-    edited = body[:index] + character + body[index + 1 :]
-    rebuilt = (
-        scheme.prefix + scheme.separator + edited if scheme.prefix else edited
-    )
+    edited = reference[:index] + character + reference[index + 1 :]
 
-    assert not scheme.verify(rebuilt)
+    assert not scheme.verify(edited)
+
+
+@given(
+    source=sources,
+    scheme=schemes(check=True),
+    at=moments,
+    position=st.integers(min_value=0),
+)
+@settings(max_examples=400)
+def test_a_stray_separator_never_verifies(
+    source: object,
+    scheme: CompactRef,
+    at: datetime,
+    position: int,
+) -> None:
+    """An extra separator is a transcription error like any other.
+
+    verify() used to pull the reference apart on the separator and delete
+    every occurrence, so ORD--20260714-… and ORD-20260714-…- both came back
+    True. That is the confusion the check character exists to prevent: a
+    caller could not tell a typo from a reference that does not exist.
+    It reads by position now.
+    """
+    assume(scheme.separator)
+
+    reference = scheme.generate(source, generated_at=at)  # type: ignore[arg-type]
+    index = position % (len(reference) + 1)
+
+    inserted = reference[:index] + scheme.separator + reference[index:]
+
+    assert not scheme.verify(inserted)
 
 
 @given(source=sources, scheme=schemes(), at=moments, count=st.integers(2, 25))
@@ -235,3 +276,212 @@ def test_the_recommended_length_actually_meets_the_target(
     sized = CompactRef(suffix_length=length, alphabet=scheme.alphabet)
 
     assert sized.collision_probability(count) <= probability
+
+
+# ---------------------------------------------------------------------------
+# 1.0.0: the configurations that make a scheme fail to verify itself
+#
+# CodeRabbit found these, and the strategy above could not have. It only ever
+# drew separators from "-" and "/", which appear in none of the alphabets it
+# draws, so the overlap was never generated. A property test explores the
+# space you hand it and no further.
+# ---------------------------------------------------------------------------
+
+
+@given(
+    alphabet=alphabets,
+    index=st.integers(min_value=0),
+)
+@settings(max_examples=200)
+def test_a_separator_from_the_alphabet_is_always_refused(
+    alphabet: str,
+    index: int,
+) -> None:
+    """Whatever the alphabet, a separator drawn from it is refused.
+
+    Were it allowed, stripping the separator in verify() would take
+    characters out of the suffix, and the scheme would reject a reference it
+    had just produced.
+    """
+    separator = alphabet[index % len(alphabet)]
+
+    with pytest.raises(ValueError, match="separator must not contain"):
+        CompactRef(alphabet=alphabet, separator=separator)
+
+
+@given(
+    alphabet=checkable_alphabets,
+    separator=st.sampled_from(["-", "/", ".", " ", "::"]),
+)
+@settings(max_examples=100)
+def test_a_separator_outside_the_alphabet_is_always_accepted(
+    alphabet: str,
+    separator: str,
+) -> None:
+    assume(not set(separator) & set(alphabet))
+
+    scheme = CompactRef(alphabet=alphabet, separator=separator, check=True)
+    reference = scheme.generate("01J2H8NQPG6B5X8KGN97SX3R5C")
+
+    assert scheme.verify(reference)
+
+
+# Depend on the machine's language: "%B" is July, julio or juillet. Refused
+# always -- a reference must not read differently in Madrid than in London.
+LOCALE_DEPENDENT_FORMATS = ["%B", "%A", "%b", "%a", "%c", "%x", "%X", "%p"]
+
+# Do not render at all on Windows: "%-d" is a glibc extension. On Linux and
+# macOS they render and vary. Either way a scheme cannot be built with them,
+# but the reason differs by platform, so they are tested apart.
+NON_PORTABLE_FORMATS = ["%-d", "%-m", "%-H", "%-M"]
+FIXED_WIDTH_FORMATS = ["%Y%m%d", "%y%m%d", "%Y%m", "%Y%m%d%H", "%j", ""]
+
+
+@given(
+    date_format=st.sampled_from(LOCALE_DEPENDENT_FORMATS),
+    check=st.booleans(),
+)
+@settings(max_examples=100)
+def test_a_locale_dependent_date_format_is_always_refused(
+    date_format: str,
+    check: bool,
+) -> None:
+    """With or without a check character. Determinism is not optional."""
+    with pytest.raises(ValueError, match="depends on the machine's"):
+        CompactRef(date_format=date_format, check=check)
+
+
+@given(date_format=st.sampled_from(NON_PORTABLE_FORMATS))
+@settings(max_examples=50)
+def test_a_date_format_that_is_not_portable_is_always_refused(
+    date_format: str,
+) -> None:
+    """Refused everywhere, for a reason that depends on where you are.
+
+    "%-d" is a glibc extension. On Windows it does not render at all, and
+    the library says so. On Linux and macOS it renders — and produces a
+    width that moves, which is refused for its own reasons. The caller
+    cannot build the scheme either way, which is the point: a reference is
+    supposed to be the same on every machine.
+    """
+    with pytest.raises(ValueError) as caught:
+        CompactRef(date_format=date_format, check=True)
+
+    message = str(caught.value)
+
+    assert repr(date_format) in message
+    assert (
+        "does not render on this platform" in message
+        or "needs a date of a fixed width" in message
+    ), message
+
+
+@given(
+    date_format=st.sampled_from(FIXED_WIDTH_FORMATS),
+    at=moments,
+    source=sources,
+)
+@settings(max_examples=300)
+def test_a_fixed_width_date_verifies_on_every_date_of_the_year(
+    date_format: str,
+    at: datetime,
+    source: object,
+) -> None:
+    """The invariant the width guard buys.
+
+    A reference must verify whatever day of the year it was made on. With a
+    variable-width format it would verify in January and be rejected in
+    December, which is the bug the guard exists to make impossible.
+    """
+    scheme = CompactRef(date_format=date_format, check=True, separator="-")
+    reference = scheme.generate(source, generated_at=at)  # type: ignore[arg-type]
+
+    assert scheme.verify(reference)
+
+
+@given(source=sources, scheme=schemes(check=True), at=moments)
+@settings(max_examples=300)
+def test_the_function_cannot_mint_what_the_class_cannot_verify(
+    source: object,
+    scheme: CompactRef,
+    at: datetime,
+) -> None:
+    """The invariant that broke when the guards lived in only one place.
+
+    generate_reference() carried no check-coverage rules, so it happily
+    produced references — 2026-07-140471283, say — that no CompactRef could
+    be built to verify, because the class refused that configuration. A
+    library should not be able to mint a thing it cannot read.
+
+    Both now share _validate_checkable(), so whatever the function produces
+    with check=True, the matching scheme verifies.
+    """
+    reference = generate_reference(
+        source,  # type: ignore[arg-type]
+        generated_at=at,
+        tz=scheme.tz,
+        suffix_length=scheme.suffix_length,
+        alphabet=scheme.alphabet,
+        check=True,
+        namespace=scheme.namespace,
+        date_format=scheme.date_format,
+        prefix=scheme.prefix,
+        separator=scheme.separator,
+    )
+
+    assert scheme.verify(reference)
+    assert reference == scheme.generate(source, generated_at=at)  # type: ignore[arg-type]
+
+
+@given(source=sources, scheme=schemes(), at=moments)
+@settings(max_examples=400)
+def test_reference_length_is_the_length_of_the_reference(
+    source: object,
+    scheme: CompactRef,
+    at: datetime,
+) -> None:
+    """Written for a column definition, so it had better be right.
+
+    String(scheme.reference_length) is only as good as this property.
+    """
+    reference = scheme.generate(source, generated_at=at)  # type: ignore[arg-type]
+
+    assert scheme.reference_length == len(reference)
+
+
+@given(scheme=schemes(check=True))
+@settings(max_examples=100)
+def test_a_checked_scheme_always_has_a_length(scheme: CompactRef) -> None:
+    """None is only ever possible without a check character.
+
+    A checked scheme cannot be built on a date that changes width, so its
+    reference cannot change width either.
+    """
+    assert scheme.reference_length is not None
+    assert scheme.date_length is not None
+
+
+@given(source=sources, scheme=schemes(), at=moments)
+@settings(max_examples=400)
+def test_parse_reassembles_whatever_generate_produced(
+    source: object,
+    scheme: CompactRef,
+    at: datetime,
+) -> None:
+    """parse() and generate() are inverses, for every configuration."""
+    assume(scheme.date_length is not None)
+
+    reference = scheme.generate(source, generated_at=at)  # type: ignore[arg-type]
+    parsed = scheme.parse(reference)
+
+    rebuilt = scheme.separator.join(
+        part
+        for part in (
+            parsed.prefix,
+            parsed.date_part,
+            parsed.suffix + (parsed.check_character or ""),
+        )
+        if part
+    )
+
+    assert rebuilt == reference
