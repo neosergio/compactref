@@ -41,23 +41,6 @@ an unusable type. That is a larger hierarchy than the problem deserves.
 Worth revisiting if a caller ever produces a real use for
 `except CompactRefError` that `except ValueError` does not already serve.
 
-### Tolerant verification for Crockford base32
-
-Crockford designed his alphabet so decoding survives a human: lowercase
-accepted, `I` and `L` read as `1`, `O` read as `0`. CompactRef takes the
-alphabet but not the tolerance — it generates upper case and verifies
-exactly, so a support agent who types `hcp3cs` is told the reference is
-invalid. That is the confusion the check character exists to prevent.
-
-It did not go into 1.0 because it needs care rather than haste. Case
-folding must not be applied to an alphabet that distinguishes case (a
-custom one containing both `a` and `A`), and the `I`/`L`/`O` mapping
-belongs to Crockford specifically, not to alphabets in general — so it is
-a property of the alphabet, not of the verifier.
-
-It is safe to add later: teaching `verify()` to accept *more* changes
-nothing that `generate()` produces and invalidates no stored reference.
-
 ## Considered, not planned
 
 Nothing below is scheduled. They are written down so the reasoning is not

@@ -84,7 +84,8 @@ because it cannot be built on a date that moves.
 
 The configuration is checked when the object is built — types as well as
 values — so a mistake raises on the line that made it rather than on the
-ten-thousandth call. It is frozen, so build it once at import and share it.
+ten-thousandth call. It is frozen, so build it once at import and share it
+— between threads too, including on a free-threaded (no-GIL) Python.
 
 Types are checked at runtime, not merely annotated, because the annotation
 is not enough. `bool` subclasses `int`, so `CompactRef(suffix_length=True)`
@@ -615,19 +616,59 @@ the end is refused, even though none of them touches the checksum.
 checked scheme cannot be built otherwise, so the checksum never skips
 anything and Luhn's guarantee is total rather than partial.
 
-**Verification is exact, and case-sensitive.** `verify()` accepts what
-`generate()` produced, and nothing else. It does not normalise, trim,
-upper-case, or repair its input.
+**Verification is exact, and case-sensitive** — unless you ask otherwise.
+`verify()` accepts what `generate()` produced, and nothing else. It does
+not normalise, trim, upper-case, or repair its input.
 
-> **On Crockford and case.** Crockford's base32 was designed to tolerate
-> transcription — lowercase accepted, `I` and `L` read as `1`, `O` read as
-> `0`. CompactRef does not do that yet: it generates upper case and
-> verifies exactly.
->
-> That is a deliberate omission rather than an oversight, and it is safe to
-> revisit. Teaching `verify()` to accept more is *additive* — it changes
-> nothing that `generate()` produces and invalidates no stored reference —
-> so it can arrive in a 1.x without breaking the promise above.
+## Reading back what a person typed
+
+Crockford's base32 was designed to survive a human: lower case accepted,
+`I` and `L` read as `1`, `O` read as `0`. A support agent who types
+`hcp3cs` meant `HCP3CS`. Build the scheme with `tolerant=True` and it
+reads input back the way Crockford intends:
+
+```python
+from compactref import CROCKFORD_BASE32, CompactRef
+
+orders = CompactRef(
+    prefix="ORD",
+    separator="-",
+    alphabet=CROCKFORD_BASE32,
+    check=True,
+    tolerant=True,
+)
+
+orders.verify("ORD-20260710-hcp3csx")       # True
+orders.verify("ORD-2O26O7lO-HCP3CSX")       # True — O for 0, l for 1
+orders.normalize("ORD-20260710-hcp3csx")    # 'ORD-20260710-HCP3CSX'
+```
+
+**Look up by `normalize()`, not by the input.** On a tolerant scheme,
+`True` from `verify()` no longer means the string is the spelling in your
+database. `normalize()` returns the spelling `generate()` wrote, so a
+lookup on it finds the row.
+
+Reading back is not repairing. A wrong character in lower case is still a
+wrong character, and the check character still catches it. `U` is read as
+nothing — Crockford dropped it to avoid obscenities, not because it looks
+like something else.
+
+Only the fields the alphabet spells are read back: the suffix, the check
+character, and — on a checked scheme — the date. The **prefix** is a label
+you chose and the **separators** are punctuation, so both are still matched
+exactly: `ord-20260710-hcp3csx` is refused. An unchecked scheme leaves its
+date alone too, since it may carry literals of its own.
+
+It is off by default because 1.0 promised exact verification: a caller
+who verifies input and then stores it would otherwise start storing lower
+case. And it is refused for any alphabet but `CROCKFORD_BASE32` — folding
+case would corrupt an alphabet holding both `a` and `A`, and `I`, `L` and
+`O` mean nothing special to any other.
+
+`normalize()` exists on every scheme. Without `tolerant` the only spelling
+accepted is the canonical one, so it returns its input — or raises
+`InvalidReferenceError`, like `parse()`, for a string that is not a
+reference at all.
 
 ## Separating references that share a source
 
@@ -843,7 +884,12 @@ Applications requiring unique references should:
 
 ## Requirements
 
-Python 3.10 or newer. No runtime dependencies.
+Python 3.10 or newer, tested through 3.15. No runtime dependencies.
+
+Safe on free-threaded Python (3.14t and later). Importing it does not turn
+the GIL back on, and a scheme shared between threads gives every thread
+exactly what it gives one — CI checks both, without a GIL, on Linux, macOS
+and Windows.
 
 ## Exceptions
 

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "compactref"
-version = "1.0.0"
+version = "1.1.0"
 description = "Generate compact human-facing references from ULIDs, UUIDs, and other stable identifiers"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -34,6 +34,8 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
+    "Programming Language :: Python :: Free Threading :: 3 - Stable",
     "Typing :: Typed",
 ]
 
