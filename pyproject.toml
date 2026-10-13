@@ -97,6 +97,12 @@ filterwarnings = ["error"]
 [tool.ruff]
 line-length = 79
 src = ["src", "tests"]
+# Ruff 0.17 formats the code blocks inside Markdown too. The README's are
+# examples, not modules: their trailing comments are aligned into columns
+# on purpose, so they read as a table of results, and the formatter would
+# collapse every one. The docs tests already check that what they name
+# exists; their layout is the author's.
+extend-exclude = ["*.md"]
 
 
 [tool.ruff.lint]
