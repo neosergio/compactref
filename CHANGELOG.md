@@ -5,6 +5,56 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-10-13
+
+### Added
+
+- **Tolerant verification for Crockford base32.** `CompactRef(...,
+  tolerant=True)` reads a reference back the way Crockford's spec intends:
+  lower case as upper, `I` and `L` as `1`, `O` as `0`. A support agent who
+  types `hcp3csx` is told yes rather than "that is not valid".
+
+  Opt-in. 1.0 promised exact, case-sensitive verification, and a scheme
+  built without `tolerant` keeps that promise unchanged. Turning it on by
+  default would have quietly changed what `True` means for every caller who
+  verifies input and then stores it.
+
+  Only the coded fields are read back — the suffix, the check character,
+  and a checked scheme's date. The prefix and separators are still matched
+  exactly. `U` is read as nothing. Refused, with `ValueError`, for any
+  alphabet but `CROCKFORD_BASE32`: the readings belong to that alphabet, not
+  to verification in general. `tolerant` is the last field, so no
+  positional argument moved.
+
+- **`CompactRef.normalize()`** returns a reference in the spelling
+  `generate()` wrote — what to store or look up after a tolerant
+  `verify()`. Structural, like `parse()`; on a scheme that is not tolerant
+  it returns its input.
+
+- **Python 3.15**, tested on Linux, macOS and Windows.
+
+- **Free-threaded Python.** Declared with the `Free Threading :: 3 -
+  Stable` classifier, and tested rather than assumed: CI runs the suite on
+  3.14t and 3.15t, with no GIL. Two new tests in `tests/test_threads.py`:
+  importing compactref, in a fresh interpreter, leaves the GIL off; and a
+  scheme shared by eight threads hitting it at once gives every one of
+  them what it gives one thread alone. Nothing in the library needed to
+  change for either — a `CompactRef` is frozen and the module holds no
+  mutable state — but "nothing needed to change" is a claim, and now a
+  test makes it. I checked that test can fail: a shared buffer slipped into
+  the encoder fails it.
+
+- **Pyrefly in CI, advisory.** A second type checker beside mypy, which
+  stays the one that blocks. Pyrefly runs as its own check and annotates
+  the PR, but cannot fail the build: it ships monthly and adds checks as it
+  goes, and a new rule flagging untouched code should be a note, not a red
+  build. Its first run found nine implicit `Any`s that `mypy --strict`
+  accepts — one in `core.py`, eight untyped lambdas in a test — fixed, so it
+  starts clean and anything it reports is new.
+
+**No reference changes.** `generate()` is untouched, and every golden test
+passes unmodified.
+
 ## [1.0.0] - 2026-07-14
 
 The API is settled. From here it does not break without a 2.0.0.
@@ -584,6 +634,7 @@ strings 0.1.0 produced.
 - `collision_probability()` and `max_references()` size the suffix using
   the birthday model.
 
+[1.1.0]: https://github.com/neosergio/compactref/releases/tag/v1.1.0
 [1.0.0]: https://github.com/neosergio/compactref/releases/tag/v1.0.0
 [0.5.0]: https://github.com/neosergio/compactref/releases/tag/v0.5.0
 [0.4.0]: https://github.com/neosergio/compactref/releases/tag/v0.4.0

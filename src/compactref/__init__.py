@@ -39,4 +39,4 @@ __all__ = [
     "suffix_length_for",
 ]
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"

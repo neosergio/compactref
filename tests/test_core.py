@@ -1416,6 +1416,8 @@ def test_an_unchecked_scheme_may_still_carry_a_literal_in_the_date() -> None:
         ("prefix", 123),
         ("separator", []),
         ("tz", "UTC"),
+        ("tolerant", 1),
+        ("tolerant", "yes"),
     ],
 )
 def test_compactref_rejects_a_configuration_of_the_wrong_type(
@@ -1540,11 +1542,11 @@ def test_the_prefix_and_separators_are_still_checked_structurally() -> None:
 def test_verification_is_exact_and_case_sensitive() -> None:
     """It accepts what generate() produced, and nothing else.
 
-    No normalising, trimming, upper-casing or repairing. Crockford's own
-    spec is tolerant — lowercase accepted, I and L read as 1, O as 0 — and
-    CompactRef is not, yet. That omission is recorded in the roadmap, and
-    it is safe to revisit: accepting *more* is additive, and invalidates no
-    stored reference.
+    No normalising, trimming, upper-casing or repairing — unless the scheme
+    is built with tolerant=True. Crockford's own spec is tolerant, and 1.1
+    offers that, but only when asked: 1.0 promised exact verification, and
+    a caller who verifies input and then stores it would otherwise start
+    storing lower case.
     """
     scheme = CompactRef(alphabet=CROCKFORD_BASE32, check=True)
     reference = scheme.generate(FIXED_ULID, generated_at=FIXED_DATETIME)
@@ -1610,19 +1612,22 @@ def test_parse_tells_a_mistyped_reference_from_a_string_that_is_not_one() -> (
     assert scheme.verify("hello") is False
 
 
-@pytest.mark.parametrize(
-    ("label", "mutate"),
-    [
-        ("doubled separator", lambda r: r.replace("ORD-", "ORD--", 1)),
-        ("trailing separator", lambda r: r + "-"),
-        ("missing separator", lambda r: r.replace("-", "", 1)),
-        ("wrong prefix", lambda r: r.replace("ORD", "INV", 1)),
-        ("no prefix", lambda r: r.removeprefix("ORD-")),
-        ("too short", lambda r: r[:-1]),
-        ("too long", lambda r: r + "7"),
-        ("outside the alphabet", lambda r: r[:-1] + "Z"),
-    ],
-)
+# Typed, so the lambdas below are Callable[[str], str] rather than Any. A
+# parametrize list is otherwise anonymous, and a mutation that returned the
+# wrong type would type-check.
+MALFORMATIONS: list[tuple[str, Callable[[str], str]]] = [
+    ("doubled separator", lambda r: r.replace("ORD-", "ORD--", 1)),
+    ("trailing separator", lambda r: r + "-"),
+    ("missing separator", lambda r: r.replace("-", "", 1)),
+    ("wrong prefix", lambda r: r.replace("ORD", "INV", 1)),
+    ("no prefix", lambda r: r.removeprefix("ORD-")),
+    ("too short", lambda r: r[:-1]),
+    ("too long", lambda r: r + "7"),
+    ("outside the alphabet", lambda r: r[:-1] + "Z"),
+]
+
+
+@pytest.mark.parametrize(("label", "mutate"), MALFORMATIONS)
 def test_parse_refuses_a_string_that_is_not_shaped_like_a_reference(
     label: str,
     mutate: Callable[[str], str],
@@ -1793,3 +1798,141 @@ def test_an_unchecked_scheme_still_tolerates_a_date_it_cannot_spell() -> None:
 
     assert parsed.date_part == "2026-07-10"
     assert parsed.check_character is None
+
+
+# ---------------------------------------------------------------------------
+# 1.1.0: tolerant verification for Crockford base32
+# ---------------------------------------------------------------------------
+
+
+def tolerant_orders() -> CompactRef:
+    return CompactRef(
+        prefix="ORD",
+        separator="-",
+        alphabet=CROCKFORD_BASE32,
+        check=True,
+        tolerant=True,
+    )
+
+
+def test_tolerance_is_off_unless_asked_for() -> None:
+    # 1.0 promised exact verification. A scheme built as it was then must
+    # still refuse what it refused then.
+    assert CompactRef().tolerant is False
+
+    scheme = CompactRef(alphabet=CROCKFORD_BASE32, check=True)
+    reference = scheme.generate(FIXED_ULID, generated_at=FIXED_DATETIME)
+
+    assert scheme.verify(reference.lower()) is False
+
+
+def test_a_tolerant_scheme_reads_a_reference_back_as_crockford_intends() -> (
+    None
+):
+    """Lower case as upper, I and L as 1, O as 0.
+
+    The support agent who types ``hcp3cs`` is told yes, and the lookup
+    finds the row.
+    """
+    scheme = tolerant_orders()
+    reference = scheme.generate(FIXED_ULID, generated_at=FIXED_DATETIME)
+    assert reference == "ORD-20260710-HCP3CSX"
+
+    for typed in (
+        "ORD-20260710-hcp3csx",
+        "ORD-2O26O7lO-HCP3CSX",
+        "ORD-2o26o7Io-hcp3csx",
+        "ORD-20260710-HcP3cSx",
+    ):
+        assert scheme.verify(typed), typed
+        assert scheme.normalize(typed) == reference, typed
+
+    parsed = scheme.parse("ORD-2o26o7lo-hcp3csx")
+
+    # Handed back in the spelling generate() uses.
+    assert parsed.date_part == "20260710"
+    assert parsed.suffix == "HCP3CS"
+    assert parsed.check_character == "X"
+
+
+def test_tolerance_reads_a_typo_back_and_still_catches_it() -> None:
+    # Reading back is not repairing. A wrong character in lower case is
+    # still a wrong character, and the check character still sees it.
+    scheme = tolerant_orders()
+
+    assert scheme.verify("ORD-20260710-hcp3cax") is False
+    assert scheme.normalize("ORD-20260710-hcp3cax") == "ORD-20260710-HCP3CAX"
+
+
+def test_u_is_not_read_as_anything() -> None:
+    # Crockford dropped U to avoid obscenities, not because it looks like
+    # another character. There is nothing to read it back as.
+    scheme = tolerant_orders()
+
+    for typed in ("ORD-20260710-UCP3CSX", "ORD-20260710-ucp3csx"):
+        assert scheme.verify(typed) is False
+        with pytest.raises(InvalidReferenceError, match="which the alphabet"):
+            scheme.parse(typed)
+
+
+def test_tolerance_does_not_reach_the_prefix_or_the_separators() -> None:
+    """Only the fields the alphabet spells are read back.
+
+    The prefix is a label the caller chose and the separators are
+    punctuation; neither is Crockford's, so neither is Crockford's to
+    reinterpret. A stray separator is still refused, as it was in 1.0.
+    """
+    scheme = tolerant_orders()
+
+    for typed in (
+        "ord-20260710-hcp3csx",
+        "ORD20260710-hcp3csx",
+        "ORD--20260710-hcp3csx",
+        "ORD-20260710-hcp3csx-",
+        " ORD-20260710-hcp3csx",
+    ):
+        assert scheme.verify(typed) is False, typed
+        with pytest.raises(InvalidReferenceError):
+            scheme.normalize(typed)
+
+
+@pytest.mark.parametrize("alphabet", [DIGITS, "01", "abcdefABCDEF"])
+def test_tolerance_is_refused_for_any_other_alphabet(alphabet: str) -> None:
+    """A property of Crockford's alphabet, not of verification.
+
+    Folding case would corrupt an alphabet holding both "a" and "A", and I,
+    L and O mean nothing special to any other.
+    """
+    with pytest.raises(ValueError, match="only for CROCKFORD_BASE32"):
+        CompactRef(alphabet=alphabet, tolerant=True)
+
+
+def test_an_unchecked_tolerant_scheme_leaves_its_date_alone() -> None:
+    # Its date may carry literals the alphabet does not spell — the same
+    # reason parse() does not hold it to the alphabet. Only the suffix is
+    # Crockford's, so only the suffix is read back.
+    scheme = CompactRef(
+        date_format="w%Y",
+        separator="-",
+        alphabet=CROCKFORD_BASE32,
+        tolerant=True,
+    )
+    reference = scheme.generate(FIXED_ULID, generated_at=FIXED_DATETIME)
+    date_part, suffix = reference.split("-")
+
+    assert date_part == "w2026"
+    assert scheme.normalize(f"{date_part}-{suffix.lower()}") == reference
+
+    # An unchecked date is read by width alone, as it was in 1.0, and not
+    # read back: "W" is not Crockford's to turn into "w".
+    assert scheme.normalize(f"W2026-{suffix}") == f"W2026-{suffix}"
+
+
+def test_normalize_on_an_exact_scheme_returns_its_input() -> None:
+    scheme = CompactRef(prefix="ORD", separator="-", check=True)
+    reference = scheme.generate(FIXED_ULID, generated_at=FIXED_DATETIME)
+
+    assert scheme.normalize(reference) == reference
+
+    with pytest.raises(InvalidReferenceError):
+        scheme.normalize("hello")

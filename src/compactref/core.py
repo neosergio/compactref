@@ -19,6 +19,31 @@ DIGITS = "0123456789"
 # accident. What is left is 32 characters a human can transcribe.
 CROCKFORD_BASE32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 
+# How Crockford's spec says a human transcription is read back: lower case
+# as upper, I and L as 1, O as 0. U stays unreadable — it was dropped to
+# avoid obscenities, not because it looks like anything. Every reading is
+# one character for one, so a reference keeps its width and can still be
+# read by position.
+#
+# A property of this alphabet, not of verification in general: folding case
+# would be wrong for an alphabet that contains both "a" and "A", and I, L
+# and O mean nothing special to any other.
+_CROCKFORD_READINGS = str.maketrans(
+    {
+        **{
+            letter.lower(): letter
+            for letter in CROCKFORD_BASE32
+            if letter.isalpha()
+        },
+        "I": "1",
+        "i": "1",
+        "L": "1",
+        "l": "1",
+        "O": "0",
+        "o": "0",
+    }
+)
+
 # Decimal stays the default. Anything else would move every reference our
 # callers have already stored.
 DEFAULT_ALPHABET = DIGITS
@@ -175,7 +200,9 @@ def _validate_checkable(
             f"not '%Y%m%d-%H'), or use an alphabet that can spell the date."
         )
 
-    shared = sorted(set(separator) & set(alphabet)) if separator else []
+    shared: list[str] = (
+        sorted(set(separator) & set(alphabet)) if separator else []
+    )
     if shared:
         raise ValueError(
             f"a checked reference needs a separator its suffix cannot "

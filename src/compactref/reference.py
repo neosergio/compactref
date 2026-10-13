@@ -31,7 +31,9 @@ from dataclasses import dataclass
 from datetime import datetime, tzinfo
 
 from .core import (
+    _CROCKFORD_READINGS,
     _PROBE_DATES,
+    CROCKFORD_BASE32,
     DEFAULT_ALPHABET,
     DEFAULT_DATE_FORMAT,
     DEFAULT_SUFFIX_LENGTH,
@@ -39,6 +41,7 @@ from .core import (
     SourceIdentifier,
     _check_character,
     _render_date,
+    _require_bool,
     _validate_checkable,
     _validate_configuration,
     collision_probability,
@@ -114,6 +117,9 @@ class CompactRef:
     prefix: str = ""
     separator: str = ""
     tz: tzinfo = DEFAULT_TIMEZONE
+    # Last, and off by default: 1.0 locked the order of the fields before
+    # it, and promised that verification is exact unless asked otherwise.
+    tolerant: bool = False
 
     def __post_init__(self) -> None:
         # A frozen dataclass annotates its fields; it does not enforce them.
@@ -132,6 +138,19 @@ class CompactRef:
             tz=self.tz,
             attempt=0,
         )
+
+        _require_bool(self.tolerant, "tolerant")
+        if self.tolerant and self.alphabet != CROCKFORD_BASE32:
+            # Tolerance is how Crockford's alphabet is read back, and no
+            # other's. Folding case would corrupt an alphabet holding both
+            # "a" and "A"; reading I as 1 means nothing to "abcdef". Refuse
+            # rather than tolerate something nobody defined.
+            raise ValueError(
+                "tolerant=True is defined only for CROCKFORD_BASE32, whose "
+                "spec says how a human transcription is read back: lower "
+                "case as upper, I and L as 1, O as 0. No other alphabet "
+                "has such a reading."
+            )
 
         # A date_format that does not render on this platform is broken
         # here, check character or not. Fail on the line that chose it.
@@ -279,6 +298,11 @@ class CompactRef:
         *not* decide whether the check character is right; verify() does
         that, on top of this.
 
+        On a ``tolerant`` scheme the coded fields are read back as Crockford
+        intends — lower case as upper, I and L as 1, O as 0 — and handed
+        back in the spelling generate() uses. The prefix and separators are
+        still matched exactly.
+
         The distinction is the one a support desk needs. A reference that
         parses but fails verify() is *shaped* like yours and mistyped. A
         reference that does not parse is not yours at all. "That is one of
@@ -390,6 +414,20 @@ class CompactRef:
         # An unchecked scheme is left alone: its date may legitimately carry
         # literals the alphabet has no index for, and there is no checksum
         # for them to fool.
+        if self.tolerant:
+            # Read back as Crockford says a human wrote it. Only the fields
+            # the alphabet spells: the prefix is a label and the separators
+            # are punctuation, both matched literally above. An unchecked
+            # date may carry literals of its own, so it is left alone for
+            # the same reason the stray check below leaves it alone.
+            suffix = suffix.translate(_CROCKFORD_READINGS)
+            if check_character is not None:
+                check_character = check_character.translate(
+                    _CROCKFORD_READINGS
+                )
+            if self.check:
+                date_part = date_part.translate(_CROCKFORD_READINGS)
+
         body = suffix + (check_character or "")
         if self.check:
             body += date_part
@@ -408,6 +446,51 @@ class CompactRef:
             check_character=check_character,
         )
 
+    def normalize(self, reference: str) -> str:
+        """
+        The reference exactly as generate() wrote it.
+
+        What to store, look up, or show back once a reference has been
+        typed in. On a ``tolerant`` scheme the input may be lower case, or
+        carry I, L or O where generate() wrote 1, 1 or 0; this returns the
+        spelling your database holds, so a lookup on it finds the row:
+
+            >>> orders = CompactRef(
+            ...     prefix="ORD",
+            ...     separator="-",
+            ...     alphabet=CROCKFORD_BASE32,
+            ...     check=True,
+            ...     tolerant=True,
+            ... )
+            >>> orders.normalize("ORD-20260713-rwsrdma")
+            'ORD-20260713-RWSRDMA'
+
+        On a scheme that is not tolerant the only spelling accepted is the
+        canonical one, so this returns its input unchanged.
+
+        Structural, like parse(): it does not weigh the check character.
+        Call verify() for that.
+
+        Raises:
+            InvalidReferenceError:
+                If the string is not shaped like a reference from this
+                scheme. The same cases as parse().
+        """
+        parsed = self.parse(reference)
+
+        # Joined as generate() joins: empty parts dropped, the separator
+        # between the ones that survive.
+        parts = [
+            part
+            for part in (
+                parsed.prefix,
+                parsed.date_part,
+                parsed.suffix + (parsed.check_character or ""),
+            )
+            if part
+        ]
+        return self.separator.join(parts)
+
     def verify(self, reference: str) -> bool:
         """
         Check a reference made under this scheme.
@@ -415,6 +498,10 @@ class CompactRef:
         True means the string is exactly what this scheme would have
         produced, and its check character agrees. It says nothing about
         whether the reference exists.
+
+        On a ``tolerant`` scheme, "exactly" is relaxed to "exactly, once
+        read back as Crockford intends", so True no longer means the string
+        is the stored spelling. Look it up by normalize(), not by the input.
 
         Built on parse(), so the two cannot drift: the structure is read by
         position — the right prefix, the separators where they belong, each

@@ -485,3 +485,58 @@ def test_parse_reassembles_whatever_generate_produced(
     )
 
     assert rebuilt == reference
+
+
+# Every spelling Crockford's spec reads back as each character. Upper case
+# is what generate() writes; the rest are what a person types instead.
+MISREADINGS = {"0": ["O", "o"], "1": ["I", "i", "L", "l"]}
+CROCKFORD_SPELLINGS = {
+    character: [
+        character,
+        character.lower(),
+        *MISREADINGS.get(character, []),
+    ]
+    for character in CROCKFORD_BASE32
+}
+
+
+@given(
+    source=sources,
+    at=moments,
+    suffix_length=st.integers(min_value=1, max_value=12),
+    prefix=st.sampled_from(["", "ORD"]),
+    separator=st.sampled_from(["", "-", "/"]),
+    data=st.data(),
+)
+@settings(max_examples=300)
+def test_a_tolerant_scheme_accepts_every_reading_of_its_own_reference(
+    source: object,
+    at: datetime,
+    suffix_length: int,
+    prefix: str,
+    separator: str,
+    data: st.DataObject,
+) -> None:
+    """However a person spells it, it verifies and normalises back."""
+    scheme = CompactRef(
+        suffix_length=suffix_length,
+        alphabet=CROCKFORD_BASE32,
+        check=True,
+        prefix=prefix,
+        separator=separator,
+        tolerant=True,
+    )
+    reference = scheme.generate(source, generated_at=at)  # type: ignore[arg-type]
+
+    # Only the coded part is respelled: the prefix is matched exactly, and
+    # every separator is outside the alphabet so stays as it is.
+    coded = reference[len(prefix) :]
+    typed = prefix + "".join(
+        data.draw(st.sampled_from(CROCKFORD_SPELLINGS[character]))
+        if character in CROCKFORD_SPELLINGS
+        else character
+        for character in coded
+    )
+
+    assert scheme.verify(typed)
+    assert scheme.normalize(typed) == reference

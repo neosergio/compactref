@@ -34,6 +34,35 @@ jobs:
       # type hints. Nothing but this step holds us to that promise.
       - run: mypy
 
+  pyrefly:
+    # Advisory. mypy is the type checker of record, and the one that blocks.
+    # A second checker reads the same hints differently and finds what the
+    # first lets through -- both of 1.1.0's findings were implicit Any that
+    # mypy --strict accepts. Its findings arrive as annotations on the PR.
+    #
+    # Not blocking, because Pyrefly ships monthly and adds checks as it goes:
+    # a new release may flag code nobody touched, and that should be a note
+    # on the PR, not a red build. It starts clean, so anything it reports is
+    # new. It reads its configuration from [tool.mypy].
+    #
+    # A job of its own rather than a step with continue-on-error in the job
+    # above: a step that fails quietly leaves that job green, and a warning
+    # inside a green job is a warning nobody opens. This shows as its own
+    # check, failed, without failing the run. Do not make it required.
+    name: Type check with Pyrefly (advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: pip install -e ".[dev]" "pyrefly>=1.3,<2"
+      - run: pyrefly check --output-format=github src tests
+
   test:
     name: Test (${{ matrix.os }}, Python ${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
@@ -46,17 +75,29 @@ jobs:
         # people actually use — strftime and the default text encoding are
         # exactly where a platform difference would show.
         os: [ubuntu-latest, macos-latest, windows-latest]
-        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        # The "t" builds are free-threaded: no GIL, so threads sharing one
+        # scheme really do run it at once. The README tells people to build a
+        # scheme once and share it, and tests/test_threads.py holds that
+        # advice to account. With a GIL the threads take turns and a race
+        # shows only by luck; without one it shows.
+        python-version:
+          ["3.10", "3.11", "3.12", "3.13", "3.14", "3.15", "3.14t", "3.15t"]
         exclude:
-          # The full grid is fifteen jobs for a library with no runtime
+          # The full grid is twenty-four jobs for a library with no runtime
           # dependencies. Every Python on Linux, and the ends of the range
-          # elsewhere: a platform difference would not hide in 3.12.
+          # elsewhere: a platform difference would not hide in 3.12. The
+          # newest free-threaded build runs everywhere, because threading is
+          # exactly where a platform could differ.
           - {os: macos-latest, python-version: "3.11"}
           - {os: macos-latest, python-version: "3.12"}
           - {os: macos-latest, python-version: "3.13"}
+          - {os: macos-latest, python-version: "3.14"}
+          - {os: macos-latest, python-version: "3.14t"}
           - {os: windows-latest, python-version: "3.11"}
           - {os: windows-latest, python-version: "3.12"}
           - {os: windows-latest, python-version: "3.13"}
+          - {os: windows-latest, python-version: "3.14"}
+          - {os: windows-latest, python-version: "3.14t"}
     steps:
       - uses: actions/checkout@v4
         with:
